@@ -1438,6 +1438,7 @@ input:checked + .slider:before {
 }
 
 #sendAbortBtn,
+#receiveAbortBtn,
 #receiveHideBtn {
     padding: 5px;
     border-radius: 5px;
@@ -1448,6 +1449,7 @@ input:checked + .slider:before {
 }
 
 #sendAbortBtn:hover,
+#receiveAbortBtn:hover,
 #receiveHideBtn:hover {
     color: rgb(255, 0, 0);
     transform: var(--btns-hover-scale);
@@ -1462,6 +1464,20 @@ progress {
 #imgShareSend:hover,
 #imgShareReceive:hover {
     cursor: move;
+}
+
+#dropArea {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 200px;
+    border: 2px dashed #ccc;
+    padding: 20px;
+    text-align: center;
+}
+
+#dropArea p {
+    margin: 0;
 }
 
 /*--------------------------------------------------------------

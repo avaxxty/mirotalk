@@ -15,7 +15,7 @@
  * @license For commercial use or closed source, contact us at license.mirotalk@gmail.com or purchase directly from CodeCanyon
  * @license CodeCanyon: https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661
  * @author  Miroslav Pejic - miroslav.pejic.85@gmail.com
- * @version 1.3.30
+ * @version 1.3.38
  *
  */
 
@@ -473,6 +473,7 @@ const receiveFilePercentage = getId('receiveFilePercentage');
 const receiveFileInfo = getId('receiveFileInfo');
 const receiveProgress = getId('receiveProgress');
 const receiveHideBtn = getId('receiveHideBtn');
+const receiveAbortBtn = getId('receiveAbortBtn');
 
 // Video/audio url player
 const videoUrlCont = getId('videoUrlCont');
@@ -833,6 +834,7 @@ function setButtonsToolTip() {
     setTippy(whiteboardCloseBtn, 'Close', 'right');
     // Suspend/Hide File transfer buttons
     setTippy(sendAbortBtn, 'Abort file transfer', 'right-start');
+    setTippy(receiveAbortBtn, 'Abort file transfer', 'right-start');
     setTippy(receiveHideBtn, 'Hide file transfer', 'right-start');
     // Video/audio URL player
     setTippy(videoUrlCloseBtn, 'Close the video player', 'bottom');
@@ -849,7 +851,7 @@ function refreshMainButtonsToolTipPlacement() {
     if (isMobileDevice) return;
     // main buttons
     placement = btnsBarSelect.options[btnsBarSelect.selectedIndex].value == 'vertical' ? 'right' : 'top';
-    setTippy(shareRoomBtn, 'Invite others to join', placement);
+    setTippy(shareRoomBtn, 'Share the Room', placement);
     setTippy(hideMeBtn, 'Toggle hide myself from the room view', placement);
     setTippy(audioBtn, useAudio ? 'Stop the audio' : 'My audio is disabled', placement);
     setTippy(videoBtn, useVideo ? 'Stop the video' : 'My video is disabled', placement);
@@ -1149,6 +1151,7 @@ function initClientPeer() {
     signalingSocket.on('kickOut', handleKickedOut);
     signalingSocket.on('fileInfo', handleFileInfo);
     signalingSocket.on('fileAbort', handleFileAbort);
+    signalingSocket.on('fileReceiveAbort', handleAbortFileTransfer);
     signalingSocket.on('videoPlayer', handleVideoPlayer);
     signalingSocket.on('disconnect', handleDisconnect);
     signalingSocket.on('removePeer', handleRemovePeer);
@@ -4600,7 +4603,7 @@ function setRoomEmojiButton() {
             setColor(roomEmojiPickerBtn, 'black');
         } else {
             emojiPickerContainer.style.display = 'block';
-            setColor(roomEmojiPickerBtn, 'green');
+            setColor(roomEmojiPickerBtn, 'yellow');
         }
     }
 }
@@ -4734,6 +4737,9 @@ function setMyFileShareBtn() {
     });
     sendAbortBtn.addEventListener('click', (e) => {
         abortFileTransfer();
+    });
+    receiveAbortBtn.addEventListener('click', (e) => {
+        abortReceiveFileTransfer();
     });
     receiveHideBtn.addEventListener('click', (e) => {
         hideFileTransfer();
@@ -9321,6 +9327,26 @@ function abortFileTransfer() {
 }
 
 /**
+ * Abort file transfer
+ */
+function abortReceiveFileTransfer() {
+    sendToServer('fileReceiveAbort', {
+        room_id: roomId,
+        peer_name: myPeerName,
+    });
+}
+
+/**
+ * Handle abort file transfer
+ * @param object config - peer info that abort the file transfer
+ */
+function handleAbortFileTransfer(config) {
+    console.log(`File transfer aborted by ${config.peer_name}`);
+    userLog('toast', `⚠️ File transfer aborted by ${config.peer_name}`);
+    abortFileTransfer();
+}
+
+/**
  * File Transfer aborted by peer
  */
 function handleFileAbort() {
@@ -9341,7 +9367,7 @@ function hideFileTransfer() {
 }
 
 /**
- * Select the File to Share
+ * Select or Drag and Drop the File to Share
  * @param {string} peer_id
  * @param {boolean} broadcast send to all (default false)
  */
@@ -9356,9 +9382,21 @@ function selectFileToShare(peer_id, broadcast = false) {
         position: 'center',
         title: 'Share file',
         input: 'file',
+        html: `
+        <div id="dropArea">
+            <p>Drag and drop your file here</p>
+        </div>
+        `,
         inputAttributes: {
             accept: fileSharingInput,
             'aria-label': 'Select file',
+        },
+        didOpen: () => {
+            const dropArea = getId('dropArea');
+            dropArea.addEventListener('dragenter', handleDragEnter);
+            dropArea.addEventListener('dragover', handleDragOver);
+            dropArea.addEventListener('dragleave', handleDragLeave);
+            dropArea.addEventListener('drop', handleDrop);
         },
         showDenyButton: true,
         confirmButtonText: `Send`,
@@ -9370,6 +9408,42 @@ function selectFileToShare(peer_id, broadcast = false) {
             sendFileInformations(result.value, peer_id, broadcast);
         }
     });
+
+    function handleDragEnter(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.target.style.background = 'var(--body-bg)';
+    }
+
+    function handleDragOver(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'copy';
+    }
+
+    function handleDragLeave(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.target.style.background = '';
+    }
+
+    function handleDrop(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        handleFiles(files);
+        e.target.style.background = '';
+    }
+
+    function handleFiles(files) {
+        if (files.length > 0) {
+            const file = files[0];
+            console.log('Selected file:', file);
+            Swal.close();
+            sendFileInformations(file, peer_id, broadcast);
+        }
+    }
 }
 
 /**
@@ -9838,7 +9912,7 @@ function showAbout() {
     Swal.fire({
         background: swBg,
         position: 'center',
-        title: '<strong>WebRTC P2P</strong>',
+        title: '<strong>WebRTC P2P v1.3.38</strong>',
         imageAlt: 'mirotalk-about',
         imageUrl: images.about,
         customClass: { image: 'img-about' },
@@ -9852,7 +9926,7 @@ function showAbout() {
                 onclick="window.open('https://codecanyon.net/user/miroslavpejic85')">
                 <i class="${className.heart}" ></i>&nbsp;Support
             </button>
-            <br /><br />
+            <br /><br /><br />
             Author:<a 
                 id="linkedin-button" 
                 data-umami-event="Linkedin button" 
@@ -9866,6 +9940,10 @@ function showAbout() {
                 href="mailto:miroslav.pejic.85@gmail.com?subject=MiroTalk P2P info"> 
                 miroslav.pejic.85@gmail.com
             </a>
+            <br /><br />
+            <hr />
+            <span>&copy; 2024 MiroTalk P2P, all rights reserved</span>
+            <hr />
         </div>
         `,
         showClass: { popup: 'animate__animated animate__fadeInDown' },

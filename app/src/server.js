@@ -20,6 +20,7 @@ dependencies: {
     express                 : https://www.npmjs.com/package/express
     express-openid-connect  : https://www.npmjs.com/package/express-openid-connect
     jsonwebtoken            : https://www.npmjs.com/package/jsonwebtoken
+    js-yaml                 : https://www.npmjs.com/package/js-yaml
     ngrok                   : https://www.npmjs.com/package/ngrok
     qs                      : https://www.npmjs.com/package/qs
     openai                  : https://www.npmjs.com/package/openai
@@ -27,7 +28,6 @@ dependencies: {
     swagger                 : https://www.npmjs.com/package/swagger-ui-express
     uuid                    : https://www.npmjs.com/package/uuid
     xss                     : https://www.npmjs.com/package/xss
-    yamljs                  : https://www.npmjs.com/package/yamljs
 }
 */
 
@@ -40,7 +40,7 @@ dependencies: {
  * @license For commercial use or closed source, contact us at license.mirotalk@gmail.com or purchase directly from CodeCanyon
  * @license CodeCanyon: https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661
  * @author  Miroslav Pejic - miroslav.pejic.85@gmail.com
- * @version 1.3.30
+ * @version 1.3.38
  *
  */
 
@@ -59,6 +59,7 @@ const path = require('path');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 const app = express();
+const fs = require('fs');
 const checkXSS = require('./xss.js');
 const ServerApi = require('./api');
 const Host = require('./host');
@@ -80,8 +81,6 @@ const authHost = new Host(); // Authenticated IP by Login
 let server;
 
 if (isHttps) {
-    const fs = require('fs');
-
     // Define paths to the SSL key and certificate files
     const keyPath = path.join(__dirname, '../ssl/key.pem');
     const certPath = path.join(__dirname, '../ssl/cert.pem');
@@ -173,9 +172,9 @@ const roomPresentersString = process.env.PRESENTERS || '["MiroTalk P2P"]';
 const roomPresenters = JSON.parse(roomPresentersString);
 
 // Swagger config
-const yamlJS = require('yamljs');
+const yaml = require('js-yaml');
 const swaggerUi = require('swagger-ui-express');
-const swaggerDocument = yamlJS.load(path.join(__dirname + '/../api/swagger.yaml'));
+const swaggerDocument = yaml.load(fs.readFileSync(path.join(__dirname, '/../api/swagger.yaml'), 'utf8'));
 
 // Api config
 const { v4: uuidV4 } = require('uuid');
@@ -536,13 +535,11 @@ app.get('/join/', async (req, res) => {
         */
         const { room, name, audio, video, screen, notify, hide, token } = checkXSS(req.query);
 
-        const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+        const allowRoomAccess = isAllowedRoomAccess('/join/params', req, hostCfg, authHost, peers, room);
 
-        log.debug('Direct Join', {
-            OIDCUserAuthenticated: OIDCUserAuthenticated,
-            authenticated: hostCfg.authenticated,
-            host_protected: hostCfg.protected,
-        });
+        if (!allowRoomAccess && !token) {
+            return res.status(401).json({ message: 'Direct Room Join Unauthorized' });
+        }
 
         let peerUsername,
             peerPassword = '';
@@ -574,6 +571,8 @@ app.get('/join/', async (req, res) => {
             }
         }
 
+        const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+
         // Peer valid going to auth as host
         if ((hostCfg.protected && isPeerValid && isPeerPresenter && !hostCfg.authenticated) || OIDCUserAuthenticated) {
             const ip = getIP(req);
@@ -598,17 +597,10 @@ app.get('/join/', async (req, res) => {
 
 // Join Room by id
 app.get('/join/:roomId', function (req, res) {
-    // log.debug('Join to room', { roomId: req.params.roomId });
-    const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+    //
+    const allowRoomAccess = isAllowedRoomAccess('/join/:roomId', req, hostCfg, authHost, peers, req.params.roomId);
 
-    if (OIDCUserAuthenticated || hostCfg.authenticated || authHost.isRoomActive()) {
-        log.debug('/join/room', {
-            OIDCUserAuthenticated: OIDCUserAuthenticated,
-            authenticated: hostCfg.authenticated,
-            host_protected: hostCfg.protected,
-            activeRoom: authHost.isRoomActive(),
-        });
-
+    if (allowRoomAccess) {
         if (hostCfg.protected) authHost.setRoomActive();
 
         res.sendFile(views.client);
@@ -1518,6 +1510,13 @@ io.sockets.on('connect', async (socket) => {
         await sendToRoom(room_id, socket.id, 'fileAbort');
     });
 
+    socket.on('fileReceiveAbort', async (cfg) => {
+        const config = checkXSS(cfg);
+        const { room_id, peer_name } = config;
+        log.debug('[' + socket.id + '] Peer [' + peer_name + '] send fileReceiveAbort to room_id [' + room_id + ']');
+        await sendToRoom(room_id, socket.id, 'fileReceiveAbort', config);
+    });
+
     /**
      * Relay video player action
      */
@@ -1872,6 +1871,45 @@ function getActiveRooms() {
         }
     }
     return roomPeersArray;
+}
+
+/**
+ * Check if Allowed Room Access
+ * @param {string} logMessage
+ * @param {object} req
+ * @param {object} hostCfg
+ * @param {class} authHost
+ * @param {object} roomList
+ * @param {string} roomId
+ * @returns boolean true/false
+ */
+function isAllowedRoomAccess(logMessage, req, hostCfg, authHost, peers, roomId) {
+    const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+    const hostUserAuthenticated = hostCfg.protected && hostCfg.authenticated;
+    const roomActive = authHost.isRoomActive();
+    const roomExist = roomId in peers;
+    const roomCount = Object.keys(peers).length;
+
+    log.debug(logMessage, {
+        OIDCUserEnabled: OIDC.enabled,
+        OIDCUserAuthenticated: OIDCUserAuthenticated,
+        hostUserAuthenticated: hostUserAuthenticated,
+        hostProtected: hostCfg.protected,
+        hostAuthenticated: hostCfg.authenticated,
+        roomActive: roomActive,
+        roomExist: roomExist,
+        roomCount: roomCount,
+        roomId: roomId,
+    });
+
+    const allowRoomAccess =
+        (!hostCfg.protected && !OIDC.enabled) || // No host protection and OIDC mode enabled (default)
+        OIDCUserAuthenticated || // User authenticated via OIDC
+        hostUserAuthenticated || // User authenticated via Login
+        ((OIDCUserAuthenticated || hostUserAuthenticated) && roomCount === 0) || // User authenticated joins the first room
+        roomExist; // User Or Guest join an existing Room
+
+    return allowRoomAccess;
 }
 
 /**
