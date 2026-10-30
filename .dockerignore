@@ -1,12 +1,10 @@
 # git folder
-**/.git
+.git
+.gitignore
 
 # npm
 node_modules
 npm-debug.log
-
-# package
-package-lock.json
 
 # mac
 .DS_Store

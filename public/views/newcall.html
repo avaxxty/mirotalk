@@ -12,32 +12,31 @@
         <meta charset="utf-8" />
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="darkreader-lock" />
 
         <meta
             name="description"
             content="MiroTalk powered by WebRTC, Real-time secure video calls, chat and screen sharing capabilities in the browser, from your mobile or desktop"
         />
-        <meta
-            name="keywords"
-            content="webrtc, self hosted, voip, sip, real-time communications, chat, messaging, meet, webrtc stun, webrtc turn, video meeting, video chat, video conference, multi video chat, multi video conference, peer to peer, p2p, rtc, alternative to, zoom, microsoft teams, google meet, jitsi, meeting"
-        />
 
         <!-- https://ogp.me -->
 
-        <meta property="og:type" content="app-webrtc" />
-        <meta property="og:site_name" content="MiroTalk" />
-        <meta property="og:title" content="Click the link to make a call." />
-        <meta
-            property="og:description"
-            content="MiroTalk calling provides real-time HD quality and latency simply not available with traditional technology."
-        />
-        <meta property="og:image" content="https://p2p.mirotalk.com/images/preview.png" />
-        <meta property="og:url" content="https://p2p.mirotalk.org" />
+        <meta property="og:type" content="{{OG_TYPE}}" />
+        <meta property="og:site_name" content="{{OG_SITE_NAME}}" />
+        <meta property="og:title" content="{{OG_TITLE}}" />
+        <meta property="og:description" content="{{OG_DESCRIPTION}}" />
+        <meta property="og:image" content="{{OG_IMAGE}}" />
+        <meta property="og:url" content="{{OG_URL}}" />
 
         <!-- StyleSheet -->
 
+        <link rel="stylesheet" href="../css/_tokens.css" />
         <link rel="stylesheet" href="../css/landing.css" />
         <link rel="stylesheet" href="../css/newcall.css" />
+
+        <!-- https://animate.style 4 using for swal fadeIn-Out -->
+
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css" />
 
         <!-- https://cdnjs.com/libraries/font-awesome -->
 
@@ -45,13 +44,18 @@
 
         <!-- JavaScripts -->
 
-        <script async src="../js/umami.js"></script>
+        <script async src="../js/stats.js"></script>
 
         <!-- xss -->
 
         <script src="https://cdn.jsdelivr.net/npm/xss/dist/xss.min.js"></script>
+
+        <!-- sweetalert -->
+
+        <script defer src="https://cdn.jsdelivr.net/npm/sweetalert2@11.4.8"></script>
     </head>
-    <body class="has-animations">
+    <body class="has-animations sticky-header">
+        <a class="skip-link" href="#main">Skip to main content</a>
         <div class="body-wrap">
             <header class="site-header reveal-from-top">
                 <div class="container">
@@ -73,19 +77,27 @@
                     </div>
                 </div>
             </header>
-            <main class="site-content">
+            <main id="main" class="site-content">
                 <section class="hero section illustration-section-01">
                     <div class="container">
                         <div class="hero-inner section-inner">
                             <div class="split-wrap invert-mobile">
                                 <div class="split-item">
                                     <div class="hero-content split-item-content center-content-mobile">
-                                        <h1 class="mt-32 mb-16 reveal-from-bottom" data-reveal-delay="150">
+                                        <h1
+                                            id="newCallRoomTitle"
+                                            class="mt-32 mb-16 reveal-from-bottom"
+                                            data-reveal-delay="150"
+                                        >
                                             Pick name. <br />
                                             Share URL. <br />
                                             Start conference.
                                         </h1>
-                                        <p class="mt-0 mb-32 reveal-from-bottom" data-reveal-delay="300">
+                                        <p
+                                            id="newCallRoomDescription"
+                                            class="mt-0 mb-32 reveal-from-bottom"
+                                            data-reveal-delay="300"
+                                        >
                                             Each room has its disposable URL. Just pick a room name and share your
                                             custom URL. It's that easy.
                                         </p>
@@ -107,33 +119,46 @@
                     <div class="container">
                         <div class="cta-inner section-inner cta-split br-12">
                             <div class="cta-slogan">
-                                <h3 class="m-0">
+                                <h3 id="appJoinDescription" class="m-0">
                                     Pick a room name.<br />
                                     How about this one?
                                 </h3>
                             </div>
                             <div class="cta-action">
                                 <div class="mb-0">
-                                    <label class="form-label screen-reader" for="roomName">MiroTalk-P2P</label>
+                                    <label class="form-label screen-reader" for="roomName">Room name</label>
                                     <div class="form-group-desktop">
-                                        <input
-                                            id="roomName"
-                                            class="form-input"
-                                            type="text"
-                                            value="mirotalk"
-                                            maxlength="32"
-                                        />
-                                        <button
-                                            id="genRoomButton"
-                                            class="button button-primary br-6 mr-8 mb-8 fas fa-arrows-rotate"
-                                        ></button>
-                                        <button id="joinRoomButton" class="button button-primary br-6 pulse">
+                                        <div class="room-input-wrap">
+                                            <input
+                                                id="roomName"
+                                                class="form-input"
+                                                type="text"
+                                                value="mirotalk"
+                                                maxlength="64"
+                                            />
+                                            <button
+                                                id="genRoomButton"
+                                                class="room-gen-btn fas fa-arrows-rotate"
+                                                type="button"
+                                                aria-label="Generate a new room name"
+                                                title="Generate a new room name"
+                                            ></button>
+                                        </div>
+                                        <button id="joinRoomButton" class="button button-primary br-6">
                                             Join Room
+                                        </button>
+                                    </div>
+                                    <div class="mt-16">
+                                        <button
+                                            id="customizeRoomButton"
+                                            class="button button-custom-room button-block br-6"
+                                        >
+                                            Customize Room
                                         </button>
                                     </div>
                                 </div>
                                 <div id="lastRoomContainer" class="last-room">
-                                    <span>Your recent room:</span>
+                                    <span id="appJoinLastRoom">Your recent room:</span>
                                     <a id="lastRoom"></a>
                                 </div>
                             </div>
@@ -182,6 +207,21 @@
                                         </a>
                                     </li>
                                     <li class="footer-social-icon">
+                                        <a target="_blank" href="https://www.linkedin.com/company/mirotalk">
+                                            <svg
+                                                width="16"
+                                                height="16"
+                                                viewBox="0 0 16 16"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <title>LinkedIn</title>
+                                                <path
+                                                    d="M1.146 0C.513 0 0 .526 0 1.175v13.65C0 15.487.513 16 1.146 16h13.708c.633 0 1.146-.513 1.146-1.175V1.175C16 .526 15.487 0 14.854 0H1.146ZM4.75 13.5H2.5V6.25h2.25V13.5ZM3.625 5.25a1.313 1.313 0 1 1 0-2.625 1.313 1.313 0 0 1 0 2.625Zm9.875 8.25h-2.25V9.969c0-.922-.016-2.11-1.286-2.11-1.288 0-1.485 1.005-1.485 2.044V13.5h-2.25V6.25h2.16v.991h.03c.3-.57 1.036-1.171 2.133-1.171 2.281 0 2.703 1.502 2.703 3.455V13.5Z"
+                                                />
+                                            </svg>
+                                        </a>
+                                    </li>
+                                    <li class="footer-social-icon">
                                         <a target="_blank" href="https://www.youtube.com/watch?v=_IVn2aINYww">
                                             <svg
                                                 xmlns="http://www.w3.org/2000/svg"
@@ -213,7 +253,7 @@
                                             </svg>
                                         </a>
                                     </li>
-                                    <li>
+                                    <li class="footer-support">
                                         <a
                                             class="github-button"
                                             href="https://github.com/sponsors/miroslavpejic85"
@@ -224,7 +264,7 @@
                                             >Sponsor</a
                                         >
                                     </li>
-                                    <li>
+                                    <li class="footer-support">
                                         <a
                                             class="github-button"
                                             href="https://github.com/miroslavpejic85/mirotalk"
@@ -242,27 +282,39 @@
                             <nav class="footer-nav">
                                 <ul class="list-reset">
                                     <li>
-                                        <a href="/about">About</a>
+                                        <a href="https://docs.mirotalk.com/sites/p2p">About</a>
                                     </li>
                                     <li>
-                                        <a href="/privacy">Privacy Policy</a>
+                                        <a href="https://docs.mirotalk.com/sites/faq/">FAQ</a>
+                                    </li>
+                                    <li>
+                                        <a href="/privacy">Privacy</a>
+                                    </li>
+                                    <li>
+                                        <a href="https://p2p.mirotalk.com/api/v1/docs/">API Docs</a>
                                     </li>
                                     <li>
                                         <a target="_blank" href="https://www.linkedin.com/in/miroslav-pejic-976a07101/"
-                                            >Contact: Miroslav Pejic</a
+                                            >Contact</a
                                         >
                                     </li>
                                 </ul>
                             </nav>
-                            <div class="footer-copyright">&copy; 2024 MiroTalk, all rights reserved</div>
+                            <div class="footer-copyright">
+                                &copy; 2026 MiroTalk
+                                <span id="footerVersion" class="footer-version">{{APP_VERSION}}</span>
+                            </div>
                         </div>
                     </div>
                 </div>
             </footer>
         </div>
 
+        <script defer src="../js/swal.js"></script>
+        <script defer src="../js/utils.js"></script>
         <script defer src="../js/brand.js"></script>
         <script defer src="../js/landing.js"></script>
+        <script defer src="../js/landingEffects.js"></script>
         <script defer src="../js/common.js"></script>
         <script async defer src="https://buttons.github.io/buttons.js"></script>
     </body>

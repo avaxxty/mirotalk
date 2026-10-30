@@ -12,40 +12,28 @@
         <meta charset="utf-8" />
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta name="darkreader-lock" />
 
         <meta
             name="description"
             content="MiroTalk powered by WebRTC, Real-time secure video calls, chat and screen sharing capabilities in the browser, from your mobile or desktop"
         />
-        <meta
-            name="keywords"
-            content="webrtc, RTCICECandidates, RTCSessionDescription, RTCDataChannel, real-time communications, webrtc stun, webrtc turn, video meeting, video chat, video conference, multi video chat, multi video conference, peer to peer, p2p, zoom, rtc, teams"
-        />
-
-        <!-- https://ogp.me -->
-
-        <meta property="og:type" content="app-webrtc" />
-        <meta property="og:site_name" content="MiroTalk" />
-        <meta property="og:title" content="Click the link to make a call." />
-        <meta
-            property="og:description"
-            content="MiroTalk calling provides real-time HD quality and latency simply not available with traditional technology."
-        />
-        <meta property="og:image" content="https://p2p.mirotalk.com/images/preview.png" />
-        <meta property="og:url" content="https://p2p.mirotalk.org" />
 
         <!-- StyleSheet -->
 
+        <link rel="stylesheet" href="../css/_tokens.css" />
         <link rel="stylesheet" href="../css/landing.css" />
         <link rel="stylesheet" href="../css/newcall.css" />
 
         <!-- JavaScripts -->
 
-        <script async src="../js/umami.js"></script>
+        <script async src="../js/stats.js"></script>
     </head>
-    <body class="has-animations">
+    <body class="has-animations sticky-header">
+        <a class="skip-link" href="#main">Skip to main content</a>
         <div class="body-wrap">
             <header class="site-header reveal-from-top">
+                <div class="scroll-progress" aria-hidden="true"></div>
                 <div class="container">
                     <div class="site-header-inner">
                         <div class="brand">
@@ -65,7 +53,7 @@
                     </div>
                 </div>
             </header>
-            <main class="site-content mt-48">
+            <main id="main" class="site-content mt-48">
                 <section class="hero section">
                     <div class="container">
                         <div class="hero-inner section-inner">
@@ -75,58 +63,86 @@
                                         <h1 class="mt-0 mb-16 reveal-from-bottom" data-reveal-delay="150">
                                             Privacy Policy
                                         </h1>
-                                        <p class="mt-0 mb-32 reveal-from-bottom" data-reveal-delay="300">
-                                            We limit ourselves to collect the smallest amount of user data that we need
-                                            in order to create a seamless experience when using
-                                            <strong>MiroTalk</strong>. <br /><br />
-                                            This data includes mainly:
-                                            <a
-                                                href="https://developer.mozilla.org/en-US/docs/Web/API/RTCIceCandidate"
-                                                target="_blank"
-                                                >RTCICECandidates</a
-                                            >
-                                            &
-                                            <a
-                                                href="https://developer.mozilla.org/en-US/docs/Web/API/RTCSessionDescription"
-                                                target="_blank"
-                                                >RTCSessionDescription</a
-                                            >
-                                            which is needed to establish the video call using WebRTC. RTCICECandidates,
-                                            RTCSessionDescription is not stored in any persistent database, it's removed
-                                            from the server as soon as the user leaves the call by closing the browser
-                                            window. The media streams are encrypted using Secure Real-time Transport
-                                            Protocol (SRTP).
-                                            <br /><br />
-                                            For Chat messaging and File Sharing, we using WebRTC's
-                                            <a
-                                                href="https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel"
-                                                target="_blank"
-                                                >RTCDataChannel</a
-                                            >
-                                            to transfer data directly from one peer to another. With RTCDataChannel, all
-                                            data is secured with
-                                            <a
-                                                href="https://en.wikipedia.org/wiki/Datagram_Transport_Layer_Security"
-                                                target="_blank"
-                                                >Datagram Transport Layer Security</a
-                                            >
-                                            (DTLS). DTLS is a derivative of SSL, meaning your data will be as secure as
-                                            using any standard SSL-based connection.
-                                            <br /><br />
-                                            If you record a meeting, the recording of the meeting is temporarily stored
-                                            on <strong>Your browser</strong>
-                                            <a
-                                                href="https://developer.mozilla.org/en-US/docs/Web/API/Blob"
-                                                target="_blank"
-                                                >Blob</a
-                                            >, then will be downloaded on Your PC/Mobile Device. <br /><br />
-                                            <strong>MiroTalk</strong> is purely peer-to-peer, which means the user's
-                                            video, audio, chat and file is not sent to our server at all. <br /><br />
-                                            We use Umami to track aggregated usage statistics in order to improve our
-                                            service. The maker of
-                                            <strong>MiroTalk</strong> has no intention of using personally or selling
-                                            any of the above-mentioned data.
-                                        </p>
+                                        <div class="mt-0 mb-32 reveal-from-bottom" data-reveal-delay="300">
+                                            <p>
+                                                <strong>Minimal Data Collection</strong><br />
+                                                We collect only the minimal data required to provide real-time
+                                                communication functionality in <strong>MiroTalk</strong>.
+                                            </p>
+                                            <p>
+                                                <strong>Signaling Data</strong><br />
+                                                <strong>MiroTalk</strong> is a real-time peer-to-peer WebRTC
+                                                application. Establishing a connection requires temporary signaling data
+                                                such as
+                                                <a
+                                                    href="https://developer.mozilla.org/en-US/docs/Web/API/RTCIceCandidate"
+                                                    target="_blank"
+                                                    >RTCICECandidates</a
+                                                >
+                                                and
+                                                <a
+                                                    href="https://developer.mozilla.org/en-US/docs/Web/API/RTCSessionDescription"
+                                                    target="_blank"
+                                                    >RTCSessionDescription</a
+                                                >. This data is used only to negotiate the connection between peers.
+                                            </p>
+                                            <p>
+                                                <strong>No Persistent Storage</strong><br />
+                                                This signaling data is not stored in any persistent database and is
+                                                discarded immediately after the session ends or the user leaves the
+                                                call. <strong>MiroTalk</strong> does not retain chat, audio, video, or
+                                                file transfer content.
+                                            </p>
+                                            <p>
+                                                <strong>Encryption</strong><br />
+                                                Media streams are transmitted directly between peers using WebRTC and
+                                                are encrypted using
+                                                <a
+                                                    href="https://en.wikipedia.org/wiki/Secure_Real-time_Transport_Protocol"
+                                                    target="_blank"
+                                                    >Secure Real-time Transport Protocol</a
+                                                >
+                                                (SRTP). Data channels used for chat and file sharing via
+                                                <a
+                                                    href="https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel"
+                                                    target="_blank"
+                                                    >RTCDataChannel</a
+                                                >
+                                                are secured using
+                                                <a
+                                                    href="https://en.wikipedia.org/wiki/Datagram_Transport_Layer_Security"
+                                                    target="_blank"
+                                                    >Datagram Transport Layer Security</a
+                                                >
+                                                (DTLS).
+                                            </p>
+                                            <p>
+                                                <strong>Peer-to-Peer Architecture</strong><br />
+                                                <strong>MiroTalk</strong> does not act as an intermediary for user
+                                                communications. Audio, video, chat messages, and file transfers are
+                                                exchanged directly between users and are not routed through or stored on
+                                                <strong>MiroTalk</strong> servers.
+                                            </p>
+                                            <p>
+                                                <strong>Recordings</strong><br />
+                                                Meeting recordings (if enabled by the user) are temporarily stored in
+                                                the user's browser as a
+                                                <a
+                                                    href="https://developer.mozilla.org/en-US/docs/Web/API/Blob"
+                                                    target="_blank"
+                                                    >Blob</a
+                                                >
+                                                and downloaded locally to the user's device.
+                                                <strong>MiroTalk</strong> does not have access to or store these
+                                                recordings.
+                                            </p>
+                                            <p>
+                                                <strong>Analytics</strong><br />
+                                                We use Umami to collect aggregated, non-personal usage statistics to
+                                                improve the service. This data is not used to identify users and is not
+                                                sold or shared with third parties.
+                                            </p>
+                                        </div>
                                         <div class="reveal-from-bottom" data-reveal-delay="450">
                                             <a
                                                 class="button button-custom button-wide-mobile br-6 pulse"
@@ -189,6 +205,21 @@
                                         </a>
                                     </li>
                                     <li class="footer-social-icon">
+                                        <a target="_blank" href="https://www.linkedin.com/company/mirotalk">
+                                            <svg
+                                                width="16"
+                                                height="16"
+                                                viewBox="0 0 16 16"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <title>LinkedIn</title>
+                                                <path
+                                                    d="M1.146 0C.513 0 0 .526 0 1.175v13.65C0 15.487.513 16 1.146 16h13.708c.633 0 1.146-.513 1.146-1.175V1.175C16 .526 15.487 0 14.854 0H1.146ZM4.75 13.5H2.5V6.25h2.25V13.5ZM3.625 5.25a1.313 1.313 0 1 1 0-2.625 1.313 1.313 0 0 1 0 2.625Zm9.875 8.25h-2.25V9.969c0-.922-.016-2.11-1.286-2.11-1.288 0-1.485 1.005-1.485 2.044V13.5h-2.25V6.25h2.16v.991h.03c.3-.57 1.036-1.171 2.133-1.171 2.281 0 2.703 1.502 2.703 3.455V13.5Z"
+                                                />
+                                            </svg>
+                                        </a>
+                                    </li>
+                                    <li class="footer-social-icon">
                                         <a target="_blank" href="https://www.youtube.com/watch?v=_IVn2aINYww">
                                             <svg
                                                 xmlns="http://www.w3.org/2000/svg"
@@ -220,7 +251,7 @@
                                             </svg>
                                         </a>
                                     </li>
-                                    <li>
+                                    <li class="footer-support">
                                         <a
                                             class="github-button"
                                             href="https://github.com/sponsors/miroslavpejic85"
@@ -231,7 +262,7 @@
                                             >Sponsor</a
                                         >
                                     </li>
-                                    <li>
+                                    <li class="footer-support">
                                         <a
                                             class="github-button"
                                             href="https://github.com/miroslavpejic85/mirotalk"
@@ -249,24 +280,37 @@
                             <nav class="footer-nav">
                                 <ul class="list-reset">
                                     <li>
-                                        <a href="/about">About</a>
+                                        <a href="https://docs.mirotalk.com/sites/p2p">About</a>
+                                    </li>
+                                    <li>
+                                        <a href="https://docs.mirotalk.com/sites/faq/">FAQ</a>
+                                    </li>
+                                    <li>
+                                        <a href="https://p2p.mirotalk.com/api/v1/docs/">API Docs</a>
                                     </li>
                                     <li>
                                         <a target="_blank" href="https://www.linkedin.com/in/miroslav-pejic-976a07101/"
-                                            >Contact: Miroslav Pejic</a
+                                            >Contact</a
                                         >
                                     </li>
                                 </ul>
                             </nav>
-                            <div class="footer-copyright">&copy; 2024 MiroTalk, all rights reserved</div>
+                            <div class="footer-copyright">&copy; 2026 MiroTalk</div>
                         </div>
                     </div>
                 </div>
             </footer>
         </div>
 
+        <button id="backToTop" class="back-to-top" type="button" aria-label="Back to top" hidden>
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 2.5 2.75 7.75l1.06 1.06L7.25 5.37V13.5h1.5V5.37l3.44 3.44 1.06-1.06Z" fill="currentColor" />
+            </svg>
+        </button>
+
         <script defer src="../js/brand.js"></script>
         <script defer src="../js/landing.js"></script>
+        <script defer src="../js/landingEffects.js"></script>
         <script async defer src="https://buttons.github.io/buttons.js"></script>
     </body>
 </html>

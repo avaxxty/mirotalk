@@ -20,11 +20,14 @@ curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 $data = array(
     "room"          => "test",
     "name"          => "mirotalk",
-    "audio"         => true,
-    "video"         => true,
+    "avatar"        => false,
+    "audio"         => false,
+    "video"         => false,
     "screen"        => false,
+    "chat"          => false,
     "hide"          => false,
     "notify"        => true,
+    "duration"      => "unlimited",
     "token"         => array(
         "username"      => "username",
         "password"      => "password",

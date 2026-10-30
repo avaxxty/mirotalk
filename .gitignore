@@ -5,8 +5,8 @@
 node_modules
 npm-debug.log
 
-# package
-package-lock.json
+# bun
+bun.lock
 
 # mac
 .DS_Store
@@ -16,8 +16,11 @@ package-lock.json
 
 # personal env
 .env
+config.js
 docker-push.sh
 docker-compose.yml
+turnserver.conf
 output
 env.txt
 
+.idea

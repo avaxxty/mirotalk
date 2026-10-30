@@ -1,6 +1,7 @@
 'use strict';
 
 let customRatio = true;
+let isHideALLVideosActive = false;
 
 // aspect       0      1      2      3       4
 let ratios = ['0:0', '4:3', '16:9', '1:1', '1:2'];
@@ -58,8 +59,13 @@ function Area(Increment, Count, Width, Height, Margin = 10) {
  * Resize video elements
  */
 function resizeVideoMedia() {
+    if (isHideALLVideosActive) return;
+
     const videoMediaContainer = getId('videoMediaContainer');
+    // Include both Camera and Screen tiles in layout sizing
     const Cameras = getEcN('Camera');
+    const Screens = getEcN('Screen');
+    const Tiles = [...Cameras, ...Screens];
 
     const Margin = 5;
     let Width = videoMediaContainer.offsetWidth - Margin * 2;
@@ -67,6 +73,8 @@ function resizeVideoMedia() {
     let max = 0;
     let optional = isHideMeActive && videoMediaContainer.childElementCount <= 2 ? 1 : 0;
     let isOneVideoElement = videoMediaContainer.childElementCount - optional == 1 ? true : false;
+    let isPinnedSingleVideo = isOneVideoElement && isVideoPinned;
+    let expandSingleVideo = isOneVideoElement && !isPinnedSingleVideo;
 
     // console.log('videoMediaContainer.childElementCount:', {
     //     isOneVideoElement: isOneVideoElement,
@@ -77,24 +85,70 @@ function resizeVideoMedia() {
     resetZoom(); //...
 
     let bigWidth = Width * 4;
-    if (isOneVideoElement) {
+    if (expandSingleVideo) {
         Width = Width - bigWidth;
     }
 
-    // loop (i recommend you optimize this)
-    let i = 1;
-    while (i < 5000) {
-        let w = Area(i, Cameras.length, Width, Height, Margin);
-        if (w === false) {
-            max = i - 1;
-            break;
+    // Optimized: binary search for best tile size
+    let low = 1;
+    let high = Math.min(Width, Height);
+    if (isPinnedSingleVideo) {
+        const tileRatio = customRatio ? 0.75 : ratio;
+        high = Math.min(Width, Math.floor((Height - Margin * 2) / tileRatio));
+    }
+    let best = 1;
+    while (low <= high) {
+        let mid = Math.floor((low + high) / 2);
+        let w = Area(mid, Tiles.length, Width, Height, Margin);
+        if (w !== false) {
+            best = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
         }
-        i++;
     }
 
-    max = max - Margin * 2;
-    setWidth(Cameras, max, bigWidth, Margin, Height, isOneVideoElement);
-    setSP('--vmi-wh', max / 3 + 'px');
+    max = best - Margin * 2;
+    setWidth(Tiles, max, bigWidth, Margin, Height, expandSingleVideo);
+
+    // When alone, use fixed avatar size; otherwise proportional to tile
+    const avatarSize = expandSingleVideo ? Math.min(200, Math.max(120, Height * 0.25)) : max / 3;
+    setSP('--vmi-wh', avatarSize + 'px');
+}
+
+let layoutAnimationRaf = null;
+
+/**
+ * Check if the user asked the system to reduce motion
+ * @returns {boolean}
+ */
+function prefersReducedMotion() {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * Smoothly re-layout the video grid while a side panel (chat, captions) is pinned/unpinned.
+ * The CSS transition (see .layout-animating) glides the containers, and the tiles
+ * are recomputed every frame so they always follow the container's current size.
+ * Call it right BEFORE changing the containers' size, so the transition kicks in.
+ * @param {integer} duration animation length in ms (keep in sync with .layout-animating in videoGrid.css)
+ */
+function animateVideoLayout(duration = 240) {
+    if (prefersReducedMotion()) return;
+    const root = document.documentElement;
+    root.classList.add('layout-animating');
+    cancelAnimationFrame(layoutAnimationRaf);
+    const end = performance.now() + duration + 60;
+    const step = (now) => {
+        resizeVideoMedia();
+        if (now < end) {
+            layoutAnimationRaf = requestAnimationFrame(step);
+        } else {
+            root.classList.remove('layout-animating');
+            resizeVideoMedia();
+        }
+    };
+    layoutAnimationRaf = requestAnimationFrame(step);
 }
 
 /**
@@ -117,82 +171,18 @@ function resetZoom() {
  * @param {integer} maxHeight
  * @param {boolean} isOneVideoElement
  */
-function setWidth(Cameras, width, bigWidth, margin, maxHeight, isOneVideoElement) {
+function setWidth(Tiles, width, bigWidth, margin, maxHeight, isOneVideoElement) {
     ratio = customRatio ? 0.68 : ratio;
-    for (let s = 0; s < Cameras.length; s++) {
-        Cameras[s].style.width = width + 'px';
-        Cameras[s].style.margin = margin + 'px';
-        Cameras[s].style.height = width * ratio + 'px';
+    for (let s = 0; s < Tiles.length; s++) {
+        Tiles[s].style.width = width + 'px';
+        Tiles[s].style.margin = margin + 'px';
+        Tiles[s].style.height = width * ratio + 'px';
         if (isOneVideoElement) {
-            Cameras[s].style.width = bigWidth + 'px';
-            Cameras[s].style.height = bigWidth * ratio + 'px';
-            let camHeigh = Cameras[s].style.height.substring(0, Cameras[s].style.height.length - 2);
-            if (camHeigh >= maxHeight) Cameras[s].style.height = maxHeight - 2 + 'px';
+            Tiles[s].style.width = bigWidth + 'px';
+            Tiles[s].style.height = bigWidth * ratio + 'px';
+            let camHeigh = Tiles[s].style.height.substring(0, Tiles[s].style.height.length - 2);
+            if (camHeigh >= maxHeight) Tiles[s].style.height = maxHeight - 2 + 'px';
         }
-    }
-}
-
-/**
- * Handle main buttons size (responsive)
- */
-function resizeMainButtons() {
-    if (!mainButtonsBar) return;
-    // Devices break point
-    const MOBILE_BREAKPOINT = 500;
-    const TABLET_BREAKPOINT = 580;
-    const DESKTOP_BREAKPOINT = 730;
-    // Devices width x height
-    const windowWidth = window.innerWidth;
-    const windowHeight = window.innerHeight;
-    //console.log('Window size', { width: windowWidth, height: windowWidth});
-
-    // Determine whether buttons bar is vertical or horizontal
-    const isButtonsBarVertical = btnsBarSelect.selectedIndex === 0;
-
-    if (isButtonsBarVertical) {
-        // Main buttons vertical align
-        if (windowHeight <= MOBILE_BREAKPOINT) {
-            setStyles(mainButtonsBar, '0.8rem', '2px', mainButtonsIcon, '0.8rem', '25px');
-        } else if (windowHeight <= TABLET_BREAKPOINT) {
-            setStyles(mainButtonsBar, '1rem', '3px', mainButtonsIcon, '1rem', '30px');
-        } else if (windowHeight <= DESKTOP_BREAKPOINT) {
-            setStyles(mainButtonsBar, '1.2rem', '4px', mainButtonsIcon, '1rem', '35px');
-        } else {
-            // > DESKTOP_BREAKPOINT
-            setStyles(mainButtonsBar, '1.5rem', '4px', mainButtonsIcon, '1.2rem', '40px');
-        }
-    } else {
-        // Main buttons horizontal align
-        if (windowWidth <= MOBILE_BREAKPOINT) {
-            setStyles(mainButtonsBar, '0.8rem', '2px', mainButtonsIcon, '0.8rem');
-        } else if (windowWidth <= TABLET_BREAKPOINT) {
-            setStyles(mainButtonsBar, '1rem', '3px', mainButtonsIcon, '1rem');
-        } else if (windowWidth <= DESKTOP_BREAKPOINT) {
-            setStyles(mainButtonsBar, '1.2rem', '4px', mainButtonsIcon, '1rem');
-        } else {
-            // > DESKTOP_BREAKPOINT
-            setStyles(mainButtonsBar, '1.5rem', '4px', mainButtonsIcon, '1.2rem');
-        }
-    }
-    /**
-     * Set styles based on orientation
-     * @param {object} elements
-     * @param {string} fontSize
-     * @param {string} padding
-     * @param {object} icons
-     * @param {string} fontSizeIcon
-     * @param {string} bWidth
-     */
-    function setStyles(elements, fontSize, padding, icons, fontSizeIcon, bWidth = null) {
-        if (bWidth) document.documentElement.style.setProperty('--btns-width', bWidth);
-
-        elements.forEach(function (element) {
-            element.style.fontSize = fontSize;
-            element.style.padding = padding;
-        });
-        icons.forEach(function (icon) {
-            icon.style.fontSize = fontSizeIcon;
-        });
     }
 }
 
@@ -203,11 +193,13 @@ window.addEventListener(
     'load',
     function (event) {
         resizeVideoMedia();
-        resizeMainButtons();
-        window.onresize = function () {
-            resizeVideoMedia();
-            resizeMainButtons();
-        };
+        let resizeTimeout;
+        window.addEventListener('resize', function () {
+            if (resizeTimeout) cancelAnimationFrame(resizeTimeout);
+            resizeTimeout = requestAnimationFrame(function () {
+                resizeVideoMedia();
+            });
+        });
     },
-    false,
+    false
 );

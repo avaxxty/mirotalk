@@ -5,8 +5,9 @@ const CryptoJS = require('crypto-js');
 
 const { v4: uuidV4 } = require('uuid');
 
-const JWT_KEY = process.env.JWT_KEY || 'mirotalk_jwt_secret';
-const JWT_EXP = process.env.JWT_EXP || '1h';
+const config = require('./config');
+const { getJwtKeys } = require('./jwtSecret');
+const JWT_EXP = config.jwt.exp;
 module.exports = class ServerApi {
     constructor(host = null, authorization = null, api_key_secret = null) {
         this._host = host;
@@ -15,17 +16,42 @@ module.exports = class ServerApi {
     }
 
     isAuthorized() {
-        if (this._authorization != this._api_key_secret) return false;
+        if (!this._api_key_secret || typeof this._api_key_secret !== 'string') return false;
+        if (!this._authorization || typeof this._authorization !== 'string') return false;
+        if (this._authorization !== this._api_key_secret) return false;
         return true;
+    }
+
+    getStats(peers, timestamp = new Date().toISOString()) {
+        const metaKeys = new Set(['lock', 'password', 'joinLock']);
+        let totalRooms = 0;
+        let totalPeers = 0;
+
+        for (const room_id in peers) {
+            totalRooms++; // Increment room count
+            totalPeers += Object.keys(peers[room_id]).filter((k) => !metaKeys.has(k)).length;
+        }
+
+        return {
+            timestamp,
+            totalRooms,
+            totalPeers,
+        };
+    }
+
+    getActiveRooms(roomList) {
+        const metaKeys = new Set(['lock', 'password', 'joinLock']);
+        return Object.entries(roomList).map(([roomId, room]) => ({
+            id: roomId,
+            peers: room && typeof room === 'object' ? Object.keys(room).filter((k) => !metaKeys.has(k)).length : 0,
+            join: this.getProtocol() + this._host + '/' + roomId,
+        }));
     }
 
     getMeetings(peers) {
         const meetings = {};
         for (const room_id in peers) {
             const meeting = peers[room_id];
-            if (!meetings) {
-                meetings = {};
-            }
             meetings[room_id] = meeting;
         }
         return meetings;
@@ -37,15 +63,24 @@ module.exports = class ServerApi {
 
     getJoinURL(data) {
         // Get data
-        const { room, name, audio, video, screen, notify, hide, token } = data;
+        const { room, name, avatar, audio, video, screen, chat, notify, hide, duration, token } = data;
+        const { noiseSuppression } = data;
 
         const roomValue = room || uuidV4();
         const nameValue = name || 'User-' + this.getRandomNumber();
+        const avatarValue = avatar || false;
         const audioValue = audio || false;
         const videoValue = video || false;
         const screenValue = screen || false;
+        const chatValue = chat || false;
         const hideValue = hide || false;
         const notifyValue = notify || false;
+        const durationValue = duration || 'unlimited';
+        // Optional: omitted means the server default applies
+        const noiseSuppressionParam =
+            noiseSuppression === undefined || noiseSuppression === null || noiseSuppression === ''
+                ? ''
+                : `&noiseSuppression=${encodeURIComponent(noiseSuppression)}`;
         const jwtToken = token ? '&token=' + this.getToken(token) : '';
 
         const joinURL =
@@ -54,11 +89,15 @@ module.exports = class ServerApi {
             '/join?' +
             `room=${roomValue}` +
             `&name=${encodeURIComponent(nameValue)}` +
+            `&avatar=${encodeURIComponent(avatarValue)}` +
             `&audio=${audioValue}` +
             `&video=${videoValue}` +
             `&screen=${screenValue}` +
+            `&chat=${chatValue}` +
             `&hide=${hideValue}` +
             `&notify=${notifyValue}` +
+            `&duration=${durationValue}` +
+            noiseSuppressionParam +
             jwtToken;
 
         return joinURL;
@@ -70,6 +109,7 @@ module.exports = class ServerApi {
         const { username = 'username', password = 'password', presenter = false, expire } = token;
 
         const expireValue = expire || JWT_EXP;
+        const jwtKeys = getJwtKeys(config.jwt.key);
 
         // Constructing payload
         const payload = {
@@ -80,10 +120,10 @@ module.exports = class ServerApi {
 
         // Encrypt payload using AES encryption
         const payloadString = JSON.stringify(payload);
-        const encryptedPayload = CryptoJS.AES.encrypt(payloadString, JWT_KEY).toString();
+        const encryptedPayload = CryptoJS.AES.encrypt(payloadString, jwtKeys.encrypt).toString();
 
         // Constructing JWT token
-        const jwtToken = jwt.sign({ data: encryptedPayload }, JWT_KEY, { expiresIn: expireValue });
+        const jwtToken = jwt.sign({ data: encryptedPayload }, jwtKeys.sign, { expiresIn: expireValue });
 
         return jwtToken;
     }

@@ -144,27 +144,56 @@ function getRandomNumber(length) {
     return result;
 }
 
-// Typing Effect
+// Shuffle Text Effect
 
-let i = 0;
 let txt = num + adjective + noun;
-let speed = 100;
 
 /**
- * Set room name with typewriter effect
+ * Shuffle text effect for input fields
+ * @param {HTMLInputElement} input
+ * @param {string} finalValue
+ * @param {number} duration
  */
-function typeWriter() {
-    if (i < txt.length) {
-        roomName.value += txt.charAt(i);
-        i++;
-        setTimeout(typeWriter, speed);
-    }
+function shuffleText(input, finalValue, duration = 600) {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    const steps = 10;
+    const interval = duration / steps;
+    let step = 0;
+
+    input.classList.add('shuffle-active');
+
+    const timer = setInterval(() => {
+        step++;
+        const progress = step / steps;
+        let display = '';
+        for (let i = 0; i < finalValue.length; i++) {
+            if (i < finalValue.length * progress) {
+                display += finalValue[i];
+            } else {
+                display += chars[Math.floor(Math.random() * chars.length)];
+            }
+        }
+        input.value = display;
+
+        if (step >= steps) {
+            clearInterval(timer);
+            input.value = finalValue;
+            setTimeout(() => input.classList.remove('shuffle-active'), 300);
+        }
+    }, interval);
 }
 
 const roomName = document.getElementById('roomName');
 if (roomName) {
     roomName.value = '';
-    typeWriter();
+    shuffleText(roomName, txt);
+
+    roomName.onkeyup = (e) => {
+        if (e.keyCode === 13) {
+            e.preventDefault();
+            joinRoom();
+        }
+    };
 }
 
 // ####################################################################
@@ -174,25 +203,42 @@ if (roomName) {
 const lastRoomContainer = document.getElementById('lastRoomContainer');
 const lastRoom = document.getElementById('lastRoom');
 const lastRoomName = window.localStorage.lastRoom ? window.localStorage.lastRoom : '';
+
+if (lastRoomContainer) {
+    lastRoomContainer.style.display = lastRoomName ? '' : 'none';
+}
+
 if (lastRoomContainer && lastRoom && lastRoomName) {
-    lastRoomContainer.style.display = 'inline-flex';
-    lastRoom.setAttribute('href', '/join/' + lastRoomName);
+    lastRoom.setAttribute('href', '/join/' + toRoomPath(lastRoomName));
     lastRoom.innerText = lastRoomName;
 }
 
 const genRoomButton = document.getElementById('genRoomButton');
 const joinRoomButton = document.getElementById('joinRoomButton');
+const customizeRoomButton = document.getElementById('customizeRoomButton');
 const adultCnt = document.getElementById('adultCnt');
 
 if (genRoomButton) {
     genRoomButton.onclick = (e) => {
+        genRoomButton.classList.remove('spin');
+        void genRoomButton.offsetWidth;
+        genRoomButton.classList.add('spin');
         genRoom();
     };
+    genRoomButton.addEventListener('animationend', () => {
+        genRoomButton.classList.remove('spin');
+    });
 }
 
 if (joinRoomButton) {
     joinRoomButton.onclick = (e) => {
         joinRoom();
+    };
+}
+
+if (customizeRoomButton) {
+    customizeRoomButton.onclick = (e) => {
+        window.location.href = '/customizeRoom';
     };
 }
 
@@ -202,37 +248,56 @@ if (adultCnt) {
     };
 }
 
-document.getElementById('roomName').onkeyup = (e) => {
-    if (e.keyCode === 13) {
-        e.preventDefault();
-        joinRoom();
-    }
-};
-
 function genRoom() {
-    document.getElementById('roomName').value = getUUID4();
+    const input = document.getElementById('roomName');
+    shuffleText(input, getUUID4());
 }
 
 function getUUID4() {
     return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c) =>
-        (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16),
+        (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)
     );
 }
 
 function joinRoom() {
-    const roomName = filterXSS(document.getElementById('roomName').value);
-    if (roomName) {
-        window.location.href = '/join/' + roomName;
-        window.localStorage.lastRoom = roomName;
-    } else {
-        alert('Room name empty!\nPlease pick a room name.');
+    const roomName = filterXSS(document.getElementById('roomName').value).trim().replace(/\s+/g, '-');
+    const roomValid = isValidRoomName(roomName);
+
+    if (!roomName) {
+        popup('warning', 'Room name empty!\nPlease pick a room name.');
+        return;
     }
+    if (!roomValid) {
+        popup('warning', 'Invalid Room name!\nPath traversal pattern detected!');
+        return;
+    }
+
+    // Encode so chars like % # ? / don't produce a malformed URL (nginx 400)
+    window.location.href = '/join/' + encodeURIComponent(roomName);
+    window.localStorage.lastRoom = roomName;
+}
+
+function toRoomPath(name) {
+    // lastRoom may already be percent-encoded (stored from the /join/ path) or raw (from ?room=)
+    try {
+        return encodeURIComponent(decodeURIComponent(name));
+    } catch (err) {
+        return encodeURIComponent(name);
+    }
+}
+
+function isValidRoomName(input) {
+    if (typeof input !== 'string') {
+        return false;
+    }
+    const pathTraversalPattern = /(\.\.(\/|\\))+/;
+    return !pathTraversalPattern.test(input);
 }
 
 function adultContent() {
     if (
         confirm(
-            '18+ WARNING! ADULTS ONLY!\n\nExplicit material for viewing by adults 18 years of age or older. You must be at least 18 years old to access to this site!\n\nProceeding you are agree and confirm to have 18+ year.',
+            '18+ WARNING! ADULTS ONLY!\n\nExplicit material for viewing by adults 18 years of age or older. You must be at least 18 years old to access to this site!\n\nProceeding you are agree and confirm to have 18+ year.'
         )
     ) {
         window.open('https://luvlounge.ca', '_blank');

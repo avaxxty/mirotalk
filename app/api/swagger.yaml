@@ -12,6 +12,23 @@ schemes:
     - http
 
 paths:
+    /stats:
+        get:
+            tags:
+                - 'stats'
+            summary: 'Get stats'
+            description: 'Get stats'
+            produces:
+                - 'application/json'
+            security:
+                - secretApiKey: []
+            responses:
+                '200':
+                    description: 'Get Stats done'
+                    schema:
+                        $ref: '#/definitions/StatsResponse'
+                '403':
+                    description: 'Unauthorized!'
     /meetings:
         get:
             tags:
@@ -67,6 +84,9 @@ paths:
                           name:
                               type: string
                               default: 'mirotalk'
+                          avatar:
+                              type: ['boolean', 'string'] # Allow boolean or string type
+                              default: false
                           audio:
                               type: boolean
                               default: false
@@ -76,12 +96,22 @@ paths:
                           screen:
                               type: boolean
                               default: false
+                          chat:
+                              type: boolean
+                              default: false
                           hide:
                               type: boolean
                               default: false
                           notify:
                               type: boolean
                               default: false
+                          duration:
+                              type: string
+                              default: 'unlimited'
+                              description: Room time limit (HH:MM:SS or unlimited). Set by the first presenter who joins, shown to all participants as a shared countdown, and the room closes when it expires
+                          noiseSuppression:
+                              type: boolean
+                              description: Optional initial noise suppression state, omit to use the server default
                           token:
                               type: object
                               description: |
@@ -149,6 +179,20 @@ securityDefinitions:
         description: 'Format like this: authorization: {API_KEY_SECRET}'
 
 definitions:
+    StatsResponse:
+        type: object
+        properties:
+            success:
+                type: boolean
+            timestamp:
+                type: string
+                format: date-time
+                example: '2025-12-21T12:00:00Z'
+            totalRooms:
+                type: integer
+            totalPeers:
+                type: integer
+
     MeetingsResponse:
         type: object
         properties:
@@ -190,6 +234,8 @@ definitions:
         type: object
         properties:
             peer_name:
+                type: string
+            peer_avatar:
                 type: string
             peer_presenter:
                 type: boolean

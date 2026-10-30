@@ -21,11 +21,14 @@ async function getJoin() {
             body: JSON.stringify({
                 room: 'test',
                 name: 'mirotalk',
-                audio: true,
-                video: true,
+                avatar: false,
+                audio: false,
+                video: false,
                 screen: false,
+                chat: false,
                 hide: false,
                 notify: true,
+                duration: 'unlimited',
                 token: {
                     username: 'username',
                     password: 'password',

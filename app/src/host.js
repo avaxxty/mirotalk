@@ -3,7 +3,6 @@
 module.exports = class Host {
     constructor() {
         this.authorizedIPs = new Map();
-        this.roomActive = false;
     }
 
     /**
@@ -12,7 +11,10 @@ module.exports = class Host {
      * @returns string IP
      */
     getIP(req) {
-        return req.headers['x-forwarded-for'] || req.headers['X-Forwarded-For'] || req.socket.remoteAddress || req.ip;
+        // Rely on Express's resolved req.ip which honours the configured
+        // `trust proxy` setting. Reading X-Forwarded-For directly would let
+        // any client spoof its source address.
+        return req.ip || (req.socket && req.socket.remoteAddress);
     }
 
     /**
@@ -30,7 +32,6 @@ module.exports = class Host {
      */
     setAuthorizedIP(ip, authorized) {
         this.authorizedIPs.set(ip, authorized);
-        this.setRoomActive();
     }
 
     /**
@@ -43,36 +44,11 @@ module.exports = class Host {
     }
 
     /**
-     * Host room status
-     * @returns boolean
-     */
-    isRoomActive() {
-        return this.roomActive;
-    }
-
-    /**
-     * Set host room activate
-     */
-    setRoomActive() {
-        this.roomActive = true;
-    }
-
-    /**
-     * Set host room deactivate
-     */
-    setRoomDeactivate() {
-        this.roomActive = false;
-    }
-
-    /**
      * Delete ip from authorized IPs
      * @param {string} ip
      * @returns boolean
      */
     deleteIP(ip) {
-        if (this.isAuthorizedIP(ip)) {
-            this.setRoomDeactivate();
-        }
         return this.authorizedIPs.delete(ip);
     }
 };

@@ -12,27 +12,17 @@
         <meta charset="utf-8" />
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-        <!-- https://ogp.me -->
-
-        <meta property="og:type" content="app-webrtc" />
-        <meta property="og:site_name" content="MiroTalk" />
-        <meta property="og:title" content="Click the link to make a call." />
-        <meta
-            property="og:description"
-            content="MiroTalk calling provides real-time HD quality and latency simply not available with traditional technology."
-        />
-        <meta property="og:image" content="https://p2p.mirotalk.com/images/preview.png" />
-        <meta property="og:url" content="https://p2p.mirotalk.org" />
+        <meta name="darkreader-lock" />
 
         <!-- StyleSheet -->
 
+        <link rel="stylesheet" href="../css/_tokens.css" />
         <link rel="stylesheet" href="../css/landing.css" />
         <link rel="stylesheet" href="../css/newcall.css" />
 
         <!-- JavaScripts -->
 
-        <script async src="../js/umami.js"></script>
+        <script async src="../js/stats.js"></script>
     </head>
     <body class="has-animations">
         <div class="body-wrap">
@@ -73,15 +63,12 @@
                                             data-reveal-delay="300"
                                         ></p>
                                         <p class="mt-0 mb-32 reveal-from-bottom" data-reveal-delay="300">
-                                            This page you are looking not exist.
+                                            The page you are looking for does not exist.
                                         </p>
                                         <div class="reveal-from-bottom" data-reveal-delay="450">
-                                            <button
-                                                class="button button-custom button-wide-mobile br-6 pulse"
-                                                onclick="window.location.href = '/';"
+                                            <a class="button button-custom button-wide-mobile br-6 pulse" href="/"
+                                                >Go to Homepage</a
                                             >
-                                                Go to Homepage
-                                            </button>
                                         </div>
                                     </div>
                                     <style>
@@ -138,6 +125,21 @@
                                         </a>
                                     </li>
                                     <li class="footer-social-icon">
+                                        <a target="_blank" href="https://www.linkedin.com/company/mirotalk">
+                                            <svg
+                                                width="16"
+                                                height="16"
+                                                viewBox="0 0 16 16"
+                                                xmlns="http://www.w3.org/2000/svg"
+                                            >
+                                                <title>LinkedIn</title>
+                                                <path
+                                                    d="M1.146 0C.513 0 0 .526 0 1.175v13.65C0 15.487.513 16 1.146 16h13.708c.633 0 1.146-.513 1.146-1.175V1.175C16 .526 15.487 0 14.854 0H1.146ZM4.75 13.5H2.5V6.25h2.25V13.5ZM3.625 5.25a1.313 1.313 0 1 1 0-2.625 1.313 1.313 0 0 1 0 2.625Zm9.875 8.25h-2.25V9.969c0-.922-.016-2.11-1.286-2.11-1.288 0-1.485 1.005-1.485 2.044V13.5h-2.25V6.25h2.16v.991h.03c.3-.57 1.036-1.171 2.133-1.171 2.281 0 2.703 1.502 2.703 3.455V13.5Z"
+                                                />
+                                            </svg>
+                                        </a>
+                                    </li>
+                                    <li class="footer-social-icon">
                                         <a target="_blank" href="https://www.youtube.com/watch?v=_IVn2aINYww">
                                             <svg
                                                 xmlns="http://www.w3.org/2000/svg"
@@ -169,7 +171,7 @@
                                             </svg>
                                         </a>
                                     </li>
-                                    <li>
+                                    <li class="footer-support">
                                         <a
                                             class="github-button"
                                             href="https://github.com/sponsors/miroslavpejic85"
@@ -180,7 +182,7 @@
                                             >Sponsor</a
                                         >
                                     </li>
-                                    <li>
+                                    <li class="footer-support">
                                         <a
                                             class="github-button"
                                             href="https://github.com/miroslavpejic85/mirotalk"
@@ -198,19 +200,25 @@
                             <nav class="footer-nav">
                                 <ul class="list-reset">
                                     <li>
-                                        <a href="/about">About</a>
+                                        <a href="https://docs.mirotalk.com/sites/p2p">About</a>
                                     </li>
                                     <li>
-                                        <a href="/privacy">Privacy Policy</a>
+                                        <a href="https://docs.mirotalk.com/sites/faq/">FAQ</a>
+                                    </li>
+                                    <li>
+                                        <a href="/privacy">Privacy</a>
+                                    </li>
+                                    <li>
+                                        <a href="https://p2p.mirotalk.com/api/v1/docs/">API Docs</a>
                                     </li>
                                     <li>
                                         <a target="_blank" href="https://www.linkedin.com/in/miroslav-pejic-976a07101/"
-                                            >Contact: Miroslav Pejic</a
+                                            >Contact</a
                                         >
                                     </li>
                                 </ul>
                             </nav>
-                            <div class="footer-copyright">&copy; 2024 MiroTalk, all rights reserved</div>
+                            <div class="footer-copyright">&copy; 2026 MiroTalk</div>
                         </div>
                     </div>
                 </div>

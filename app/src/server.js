@@ -8,26 +8,31 @@ http://patorjk.com/software/taag/#p=display&f=ANSI%20Regular&t=Server
 ███████ ███████ ██   ██   ████   ███████ ██   ██                                           
 
 dependencies: {
+    @mattermost/client      : https://www.npmjs.com/package/@mattermost/client
+    @ngrok/ngrok            : https://www.npmjs.com/package/@ngrok/ngrok
     @sentry/node            : https://www.npmjs.com/package/@sentry/node
-    @sentry/integrations    : https://www.npmjs.com/package/@sentry/integrations
     axios                   : https://www.npmjs.com/package/axios
-    body-parser             : https://www.npmjs.com/package/body-parser
-    compression             : https://www.npmjs.com/package/compression
+    chokidar                : https://www.npmjs.com/package/chokidar
     colors                  : https://www.npmjs.com/package/colors
+    compression             : https://www.npmjs.com/package/compression
     cors                    : https://www.npmjs.com/package/cors
     crypto-js               : https://www.npmjs.com/package/crypto-js
+    dompurify               : https://www.npmjs.com/package/dompurify
     dotenv                  : https://www.npmjs.com/package/dotenv
     express                 : https://www.npmjs.com/package/express
     express-openid-connect  : https://www.npmjs.com/package/express-openid-connect
+    he                      : https://www.npmjs.com/package/he
+    helmet                  : https://www.npmjs.com/package/helmet
+    httpolyglot             : https://www.npmjs.com/package/httpolyglot
+    jsdom                   : https://www.npmjs.com/package/jsdom
     jsonwebtoken            : https://www.npmjs.com/package/jsonwebtoken
-    ngrok                   : https://www.npmjs.com/package/ngrok
-    qs                      : https://www.npmjs.com/package/qs
+    js-yaml                 : https://www.npmjs.com/package/js-yaml
+    nodemailer              : https://www.npmjs.com/package/nodemailer
     openai                  : https://www.npmjs.com/package/openai
+    qs                      : https://www.npmjs.com/package/qs
     socket.io               : https://www.npmjs.com/package/socket.io
-    swagger                 : https://www.npmjs.com/package/swagger-ui-express
+    swagger-ui-express      : https://www.npmjs.com/package/swagger-ui-express
     uuid                    : https://www.npmjs.com/package/uuid
-    xss                     : https://www.npmjs.com/package/xss
-    yamljs                  : https://www.npmjs.com/package/yamljs
 }
 */
 
@@ -36,11 +41,9 @@ dependencies: {
  *
  * @link    GitHub: https://github.com/miroslavpejic85/mirotalk
  * @link    Official Live demo: https://p2p.mirotalk.com
- * @license For open source use: AGPLv3
- * @license For commercial use or closed source, contact us at license.mirotalk@gmail.com or purchase directly from CodeCanyon
- * @license CodeCanyon: https://codecanyon.net/item/mirotalk-p2p-webrtc-realtime-video-conferences/38376661
+ * @license Open source: AGPLv3 | Commercial/closed source (official channel): https://docs.mirotalk.com/sites/p2p/
  * @author  Miroslav Pejic - miroslav.pejic.85@gmail.com
- * @version 1.3.30
+ * @version 2.2.42
  *
  */
 
@@ -50,93 +53,78 @@ require('dotenv').config();
 
 const { auth, requiresAuth } = require('express-openid-connect');
 const { Server } = require('socket.io');
-const http = require('http');
-const https = require('https');
+const httpolyglot = require('httpolyglot');
 const compression = require('compression');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const path = require('path');
 const axios = require('axios');
 const jwt = require('jsonwebtoken');
 const app = express();
+const fs = require('fs');
 const checkXSS = require('./xss.js');
 const ServerApi = require('./api');
+const { getJwtKeys } = require('./jwtSecret');
+const MattermostController = require('./mattermost');
+const Validate = require('./validate');
+const RoomPassword = require('./roomPassword');
+const RoomTimeLimit = require('./roomTimeLimit');
+const RoomPolls = require('./roomPolls');
+const RoomBreakouts = require('./roomBreakouts');
+const HtmlInjector = require('./htmlInjector');
 const Host = require('./host');
 const Logs = require('./logs');
+const { applyEmbedHeaders, embedAllowedOrigins, embedCsp } = require('./middleware/embedHeaders');
 const log = new Logs('server');
+
+// Central configuration (reads .env via dotenv internally)
+const config = require('./config');
 
 // Email alerts and notifications
 const nodemailer = require('./lib/nodemailer');
 
 const packageJson = require('../../package.json');
 
-const domain = process.env.HOST || 'localhost';
-const isHttps = process.env.HTTPS == 'true'; // Use self-signed certificates instead of Certbot and Let's Encrypt
-const port = process.env.PORT || 3000; // must be the same to client.js signalingServerPort
-const host = `http${isHttps ? 's' : ''}://${domain}:${port}`;
+const { loginLimiter, createRoomTokenLimiter } = require('./middleware/rateLimiter');
+const { isOidcConfiguredPresenter } = require('./oidcPresenter');
+const { parseHostUsers, isRoomAllowedForUser } = require('./hostUsers');
+
+const port = config.server.port;
+const host = config.server.host;
 
 const authHost = new Host(); // Authenticated IP by Login
 
-let server;
+// Define paths to the SSL key and certificate files
+const keyPath = path.join(__dirname, '../ssl/key.pem');
+const certPath = path.join(__dirname, '../ssl/cert.pem');
 
-if (isHttps) {
-    const fs = require('fs');
+// Read SSL key and certificate files securely
+const options = {
+    key: fs.readFileSync(keyPath, 'utf-8'),
+    cert: fs.readFileSync(certPath, 'utf-8'),
+};
 
-    // Define paths to the SSL key and certificate files
-    const keyPath = path.join(__dirname, '../ssl/key.pem');
-    const certPath = path.join(__dirname, '../ssl/cert.pem');
+// Server both http and https
+const server = httpolyglot.createServer(options, app);
 
-    // Check if SSL key file exists
-    if (!fs.existsSync(keyPath)) {
-        log.error('SSL key file not found.');
-        process.exit(1); // Exit the application if the key file is missing
+// Handle client errors (malformed/incomplete HTTP requests) gracefully
+server.on('clientError', (err, socket) => {
+    err.code === 'HPE_HEADER_OVERFLOW' || err.message === 'Parse Error'
+        ? log.warn('Client HTTP parse error', { error: err.message, code: err.code })
+        : log.warn('Client connection error', { error: err.message, code: err.code });
+    if (socket && !socket.destroyed) {
+        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
     }
+});
 
-    // Check if SSL certificate file exists
-    if (!fs.existsSync(certPath)) {
-        log.error('SSL certificate file not found.');
-        process.exit(1); // Exit the application if the certificate file is missing
-    }
-
-    // Read SSL key and certificate files securely
-    const options = {
-        key: fs.readFileSync(keyPath, 'utf-8'),
-        cert: fs.readFileSync(certPath, 'utf-8'),
-    };
-
-    // Create HTTPS server using self-signed certificates
-    server = https.createServer(options, app);
-} else {
-    server = http.createServer(app);
-}
+// Trust Proxy
+const trustProxy = config.server.trustProxy;
 
 // Cors
-
-const cors_origin = process.env.CORS_ORIGIN;
-const cors_methods = process.env.CORS_METHODS;
-
-let corsOrigin = '*';
-let corsMethods = ['GET', 'POST'];
-
-if (cors_origin && cors_origin !== '*') {
-    try {
-        corsOrigin = JSON.parse(cors_origin);
-    } catch (error) {
-        log.error('Error parsing CORS_ORIGIN', error.message);
-    }
-}
-
-if (cors_methods && cors_methods !== '') {
-    try {
-        corsMethods = JSON.parse(cors_methods);
-    } catch (error) {
-        log.error('Error parsing CORS_METHODS', error.message);
-    }
-}
-
 const corsOptions = {
-    origin: corsOrigin,
-    methods: corsMethods,
+    origin: config.cors.origin,
+    methods: config.cors.methods,
 };
 
 /*  
@@ -151,54 +139,215 @@ const io = new Server({
 // console.log(io);
 
 // Host protection (disabled by default)
-const hostProtected = getEnvBoolean(process.env.HOST_PROTECTED);
-const userAuth = getEnvBoolean(process.env.HOST_USER_AUTH);
-const hostUsersString = process.env.HOST_USERS || '[{"username": "MiroTalk", "password": "P2P"}]';
-const hostUsers = JSON.parse(hostUsersString);
 const hostCfg = {
-    protected: hostProtected,
-    user_auth: userAuth,
-    users: hostUsers,
-    authenticated: !hostProtected,
+    protected: config.host.protected,
+    user_auth: config.host.userAuth,
+    // Normalized here too, so an older config.js (raw JSON users) still gets displayname/allowed_rooms defaults
+    users: parseHostUsers(
+        Array.isArray(config.host.users) && config.host.users.length ? config.host.users : process.env.HOST_USERS
+    ),
+    authenticated: !config.host.protected,
+    maxRoomParticipants: config.host.maxRoomParticipants,
+    showActiveRooms: config.host.showActiveRooms,
 };
 
-// JWT config
+// Validate host user passwords if host protection or user authentication is enabled
+if (
+    (hostCfg.protected || hostCfg.user_auth) &&
+    (!Array.isArray(hostCfg.users) || hostCfg.users.some((user) => !user || !Validate.isValidPassword(user.password)))
+) {
+    throw new Error('HOST_USERS passwords must contain between 1 and 36 characters');
+}
+
+// Fail closed: refuse to start host protection with publicly known credentials
+const PUBLIC_DEFAULT_CREDENTIALS = [
+    { username: 'admin', password: 'admin' },
+    { username: 'guest', password: 'guest' },
+    { username: 'MiroTalk', password: 'P2P' },
+];
+if (
+    (hostCfg.protected || hostCfg.user_auth) &&
+    hostCfg.users.some((u) =>
+        PUBLIC_DEFAULT_CREDENTIALS.some((d) => u.username === d.username && u.password === d.password)
+    )
+) {
+    log.error(
+        'HOST_USERS contains publicly known default credentials (admin/admin, guest/guest, MiroTalk/P2P). Set your own in .env'
+    );
+    process.exit(1);
+}
+
+// JWT config - fail closed: refuse to start with a missing, weak or publicly known JWT key
+let jwtKeys;
+try {
+    jwtKeys = getJwtKeys(config.jwt.key);
+} catch (err) {
+    log.error('Invalid JWT configuration', err.message);
+    process.exit(1);
+}
+
 const jwtCfg = {
-    JWT_KEY: process.env.JWT_KEY || 'mirotalk_jwt_secret',
-    JWT_EXP: process.env.JWT_EXP || '1h',
+    JWT_EXP: config.jwt.exp,
 };
+
+const JWT_VERIFY_OPTIONS = { algorithms: ['HS256'] };
+
+// Short-lived token bound to a room, issued by GET /createRoomToken only to requesters the HTTP
+// policy allows to create rooms. The Socket.IO `join` event requires it to open a new room when
+// OIDC is enabled, because the socket carries no OIDC session of its own.
+const CREATE_ROOM_TOKEN_EXP = '2m';
+
+/**
+ * Creates a short-lived JWT token for creating a room.
+ * @param {string} roomId
+ * @returns {string} JWT token for creating a room
+ */
+function createCreateRoomToken(roomId) {
+    return jwt.sign({ scope: 'create-room', roomId: String(roomId) }, jwtKeys.createRoom, {
+        expiresIn: CREATE_ROOM_TOKEN_EXP,
+    });
+}
+
+/**
+ * Validates a short-lived JWT token for creating a room.
+ * @param {string} token JWT token to validate
+ * @param {string} roomId Room ID to check against the token
+ * @returns {boolean} True if the token is valid for the given room ID, false otherwise
+ */
+// Short-lived token carrying the display name verified by the OIDC provider, issued by
+// GET /oidcIdentity when OIDC_LOCK_USERNAME is enabled. The Socket.IO `join` event trusts the
+// name inside it instead of the client-supplied one.
+const IDENTITY_TOKEN_EXP = '2m';
+
+function createIdentityToken(name) {
+    return jwt.sign({ scope: 'oidc-identity', name }, jwtKeys.identity, { expiresIn: IDENTITY_TOKEN_EXP });
+}
+
+function getVerifiedIdentityName(token) {
+    if (!OIDC.enabled || !OIDC.lockUsername || !token || typeof token !== 'string') return null;
+    try {
+        const decoded = jwt.verify(token, jwtKeys.identity, JWT_VERIFY_OPTIONS);
+        return decoded?.scope === 'oidc-identity' && decoded.name ? String(decoded.name) : null;
+    } catch {
+        return null;
+    }
+}
+
+function isCreateRoomTokenValid(token, roomId) {
+    if (!token || typeof token !== 'string') return false;
+    try {
+        const decoded = jwt.verify(token, jwtKeys.createRoom, JWT_VERIFY_OPTIONS);
+        return decoded?.scope === 'create-room' && decoded.roomId === String(roomId);
+    } catch {
+        return false;
+    }
+}
 
 // Room presenters
-const roomPresentersString = process.env.PRESENTERS || '["MiroTalk P2P"]';
-const roomPresenters = JSON.parse(roomPresentersString);
+const roomPresenters = config.presenters;
+
+// Short-lived token bound to a room, issued by GET /oidcPresenterToken only to an OIDC session whose
+// verified email or sub is in PRESENTERS. The socket carries no OIDC session, so it proves it at join.
+const OIDC_PRESENTER_TOKEN_EXP = '2m';
+
+function createOidcPresenterToken(roomId) {
+    return jwt.sign({ scope: 'oidc-presenter', roomId: String(roomId) }, jwtKeys.oidcPresenter, {
+        expiresIn: OIDC_PRESENTER_TOKEN_EXP,
+    });
+}
+
+function isOidcPresenterTokenValid(token, roomId) {
+    if (!OIDC.enabled || !token || typeof token !== 'string') return false;
+    try {
+        const decoded = jwt.verify(token, jwtKeys.oidcPresenter, JWT_VERIFY_OPTIONS);
+        return decoded?.scope === 'oidc-presenter' && decoded.roomId === String(roomId);
+    } catch {
+        return false;
+    }
+}
+
+// Breakout rooms (disabled by default): when disabled every breakout request is ignored.
+// Config files created before this option fall back to the env variable.
+const breakoutRoomsEnabled = (config.breakoutRooms?.enabled ?? process.env.BREAKOUT_ROOMS_ENABLED === 'true') === true;
+
+// Breakout rooms: ticket issued by the server with each move order, proving at join time that
+// the peer was sent to this room (bypasses room creation/lock checks and carries the presenter role).
+// A ticket is honored while its session is open; a ticket back to the main room also stays valid
+// for a short time after the session is closed, so the last peers can still return.
+// Tickets are tracked by id, so moving a peer again or kicking it out revokes them.
+const BREAKOUT_TICKET_EXP = '12h';
+const BREAKOUT_RETURN_WINDOW_MS = RoomBreakouts.ORPHAN_STATE_TTL_MS;
+// Close a session when all its rooms stayed empty for this long (moves reload the page, so rooms are briefly empty)
+const BREAKOUT_IDLE_MS = 60 * 1000;
+
+function createBreakoutToken({ room, main, sid, uuid, presenter }) {
+    const jti = uuidV4();
+    const token = jwt.sign(
+        {
+            scope: 'breakout',
+            room: String(room),
+            main: String(main),
+            sid: String(sid),
+            uuid: String(uuid || ''),
+            presenter: presenter === true,
+        },
+        jwtKeys.breakout,
+        { expiresIn: BREAKOUT_TICKET_EXP, jwtid: jti }
+    );
+    return { token, jti };
+}
+
+/**
+ * @param {string} token
+ * @param {string} roomId room being joined
+ * @param {string} peerUuid peer_uuid sent with the join
+ * @returns {{ main: string, presenter: boolean, jti: string }|null} valid ticket for this room and peer
+ */
+function getBreakoutTicket(token, roomId, peerUuid) {
+    if (!breakoutRoomsEnabled || !token || typeof token !== 'string') return null;
+    try {
+        const decoded = jwt.verify(token, jwtKeys.breakout, JWT_VERIFY_OPTIONS);
+        if (decoded?.scope !== 'breakout' || decoded.room !== String(roomId)) return null;
+        if (decoded.uuid !== String(peerUuid || '')) return null;
+        if (!RoomBreakouts.isTicketValid(decoded)) return null;
+        return { main: decoded.main, presenter: decoded.presenter === true, jti: decoded.jti };
+    } catch {
+        return null;
+    }
+}
 
 // Swagger config
-const yamlJS = require('yamljs');
+const yaml = require('js-yaml');
 const swaggerUi = require('swagger-ui-express');
-const swaggerDocument = yamlJS.load(path.join(__dirname + '/../api/swagger.yaml'));
+const swaggerDocument = yaml.load(fs.readFileSync(path.join(__dirname, '/../api/swagger.yaml'), 'utf8'));
 
 // Api config
 const { v4: uuidV4 } = require('uuid');
 const apiBasePath = '/api/v1'; // api endpoint path
 const api_docs = host + apiBasePath + '/docs'; // api docs
-const api_key_secret = process.env.API_KEY_SECRET || 'mirotalkp2p_default_secret';
-const apiDisabledString = process.env.API_DISABLED || '["token", "meetings"]';
-const api_disabled = JSON.parse(apiDisabledString);
+const api_key_secret = config.api.keySecret;
+const api_disabled = config.api.disabled;
 
 // Ngrok config
-const ngrok = require('ngrok');
-const ngrokEnabled = getEnvBoolean(process.env.NGROK_ENABLED);
-const ngrokAuthToken = process.env.NGROK_AUTH_TOKEN;
+const ngrok = require('@ngrok/ngrok');
+const ngrokEnabled = config.ngrok.enabled;
+const ngrokAuthToken = config.ngrok.authToken;
+
+// Handle WebHook
+const webhook = {
+    enabled: config.webhook?.enabled || false,
+    url: config.webhook?.url || 'http://localhost:8888/webhook-endpoint',
+};
 
 // Stun (https://bloggeek.me/webrtcglossary/stun/)
 // Turn (https://bloggeek.me/webrtcglossary/turn/)
 const iceServers = [];
-const stunServerUrl = process.env.STUN_SERVER_URL;
-const turnServerUrl = process.env.TURN_SERVER_URL;
-const turnServerUsername = process.env.TURN_SERVER_USERNAME;
-const turnServerCredential = process.env.TURN_SERVER_CREDENTIAL;
-const stunServerEnabled = getEnvBoolean(process.env.STUN_SERVER_ENABLED);
-const turnServerEnabled = getEnvBoolean(process.env.TURN_SERVER_ENABLED);
+const stunServerUrl = config.webrtc.stun.url;
+const turnServerUrl = config.webrtc.turn.url;
+const turnServerUsername = config.webrtc.turn.username;
+const turnServerCredential = config.webrtc.turn.credential;
+const stunServerEnabled = config.webrtc.stun.enabled;
+const turnServerEnabled = config.webrtc.turn.enabled;
 // Stun is mandatory for not internal network
 if (stunServerEnabled && stunServerUrl) iceServers.push({ urls: stunServerUrl });
 // Turn is recommended if direct peer to peer connection is not possible
@@ -207,62 +356,71 @@ if (turnServerEnabled && turnServerUrl && turnServerUsername && turnServerCreden
 }
 
 // Test Stun and Turn connection with query params
-// const testStunTurn = host + '/test?iceServers=' + JSON.stringify(iceServers);
-const testStunTurn = host + '/test';
+// const testStunTurn = host + '/icetest?iceServers=' + JSON.stringify(iceServers);
+const testStunTurn = host + '/icetest';
 
 // IP Lookup
-const IPLookupEnabled = getEnvBoolean(process.env.IP_LOOKUP_ENABLED);
+const IPLookupEnabled = config.ipLookup.enabled;
 
 // Survey URL
-const surveyEnabled = getEnvBoolean(process.env.SURVEY_ENABLED);
-const surveyURL = process.env.SURVEY_URL || 'https://www.questionpro.com/t/AUs7VZq00L';
+const surveyEnabled = config.survey.enabled;
+const surveyURL = config.survey.url;
 
 // Redirect URL
-const redirectEnabled = getEnvBoolean(process.env.REDIRECT_ENABLED);
-const redirectURL = process.env.REDIRECT_URL || '/newcall';
+const redirectEnabled = config.redirect.enabled;
+const redirectURL = config.redirect.url;
 
 // Sentry config
 const Sentry = require('@sentry/node');
-const { CaptureConsole } = require('@sentry/integrations');
-const sentryEnabled = getEnvBoolean(process.env.SENTRY_ENABLED);
-const sentryDSN = process.env.SENTRY_DSN;
-const sentryTracesSampleRate = process.env.SENTRY_TRACES_SAMPLE_RATE;
+const sentryEnabled = config.sentry.enabled;
+const sentryDSN = config.sentry.dsn;
+const sentryTracesSampleRate = config.sentry.tracesSampleRate;
 
 // Slack API
 const CryptoJS = require('crypto-js');
 const qS = require('qs');
-const slackEnabled = getEnvBoolean(process.env.SLACK_ENABLED);
-const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
-const bodyParser = require('body-parser');
+const slackEnabled = config.slack.enabled;
+const slackSigningSecret = config.slack.signingSecret;
 
 // Setup sentry client
-if (sentryEnabled) {
+if (sentryEnabled && typeof sentryDSN === 'string' && sentryDSN.trim()) {
+    log.info('Sentry monitoring started...');
+
     Sentry.init({
         dsn: sentryDSN,
-        integrations: [
-            new CaptureConsole({
-                // array of methods that should be captured
-                // defaults to ['log', 'info', 'warn', 'error', 'debug', 'assert']
-                levels: ['warn', 'error'],
-            }),
-        ],
-        // Set tracesSampleRate to 1.0 to capture 100%
-        // of transactions for performance monitoring.
-        // We recommend adjusting this value in production
         tracesSampleRate: sentryTracesSampleRate,
     });
+
+    const logLevels = config.sentry.logLevels;
+
+    const stripAnsi = (str) => (typeof str === 'string' ? str.replace(/\u001b\[[0-9;]*m/g, '') : str);
+
+    const originalConsole = {};
+    logLevels.forEach((level) => {
+        originalConsole[level] = console[level];
+        console[level] = function (...args) {
+            const cleanArgs = args.map(stripAnsi);
+            switch (level) {
+                case 'warn':
+                    Sentry.captureMessage(cleanArgs.join(' '), 'warning');
+                    break;
+                case 'error':
+                    args[0] instanceof Error
+                        ? Sentry.captureException(args[0])
+                        : Sentry.captureException(new Error(cleanArgs.join(' ')));
+                    break;
+            }
+            originalConsole[level].apply(console, args);
+        };
+    });
+
+    // log.error('Sentry error', { foo: 'bar' });
+    // log.warn('Sentry warning');
 }
 
 // OpenAI/ChatGPT
 let chatGPT;
-const configChatGPT = {
-    enabled: getEnvBoolean(process.env.CHATGPT_ENABLED),
-    basePath: process.env.CHATGPT_BASE_PATH,
-    apiKey: process.env.CHATGPT_APIKEY,
-    model: process.env.CHATGPT_MODEL,
-    max_tokens: parseInt(process.env.CHATGPT_MAX_TOKENS),
-    temperature: parseInt(process.env.CHATGPT_TEMPERATURE),
-};
+const configChatGPT = config.chatGPT || {};
 if (configChatGPT.enabled) {
     if (configChatGPT.apiKey) {
         const { OpenAI } = require('openai');
@@ -276,56 +434,88 @@ if (configChatGPT.enabled) {
     }
 }
 
+function getChatGPTParams(messages) {
+    const reasoningEffort = configChatGPT.reasoning_effort ?? 'none';
+    const params = {
+        model: configChatGPT.model || 'gpt-6-luna',
+        messages,
+        max_completion_tokens: configChatGPT.max_tokens || 1000,
+    };
+    if (reasoningEffort) params.reasoning_effort = reasoningEffort;
+    // Reasoning models reject temperature unless reasoning effort is 'none'
+    if (!reasoningEffort || reasoningEffort === 'none') {
+        params.temperature = Number.isFinite(configChatGPT.temperature) ? configChatGPT.temperature : 0;
+    }
+    return params;
+}
+
+// GIF search (KLIPY)
+const GIF_CONTENT_FILTERS = ['off', 'low', 'medium', 'high'];
+const configGifSearch = config.gifSearch || {};
+const gifSearchClientConfig =
+    configGifSearch.enabled && configGifSearch.apiKey
+        ? {
+              enabled: true,
+              apiKey: String(configGifSearch.apiKey).trim(),
+              contentFilter: GIF_CONTENT_FILTERS.includes(configGifSearch.contentFilter)
+                  ? configGifSearch.contentFilter
+                  : 'high',
+          }
+        : false;
+if (configGifSearch.enabled && !configGifSearch.apiKey) {
+    log.warning('GIF search (KLIPY) seems enabled, but you missing the apiKey!');
+}
+
+// Whisper Speech-to-Text (OpenAI-compatible, server-side transcription).
+// Whisper is an asynchronous SIDE-CHANNEL: it transcribes short audio segments
+// sent by the browser and returns text. It is intentionally NOT part of the
+// WebRTC media path, so it can never block, delay or modify peer audio/video.
+const configWhisper = config.whisper || {};
+const whisperLib = require('./lib/whisper');
+if (configWhisper.enabled) {
+    log.info('Whisper transcription enabled', {
+        basePath: configWhisper.basePath,
+        model: configWhisper.model,
+        language: configWhisper.language || 'auto',
+        segmentSeconds: configWhisper.segmentSeconds,
+    });
+}
+
 // IP Whitelist
-const ipWhitelist = {
-    enabled: getEnvBoolean(process.env.IP_WHITELIST_ENABLED),
-    allowed: process.env.IP_WHITELIST_ALLOWED ? JSON.parse(process.env.IP_WHITELIST_ALLOWED) : [],
-};
+const ipWhitelist = config.ipWhitelist;
 
 // OIDC - Open ID Connect
-const OIDC = {
-    enabled: process.env.OIDC_ENABLED ? getEnvBoolean(process.env.OIDC_ENABLED) : false,
-    config: {
-        issuerBaseURL: process.env.OIDC_ISSUER_BASE_URL,
-        clientID: process.env.OIDC_CLIENT_ID,
-        clientSecret: process.env.OIDC_CLIENT_SECRET,
-        baseURL: process.env.OIDC_BASE_URL,
-        secret: process.env.SESSION_SECRET,
-        authorizationParams: {
-            response_type: 'code',
-            scope: 'openid profile email',
-        },
-        authRequired: process.env.OIDC_AUTH_REQUIRED ? getEnvBoolean(process.env.OIDC_AUTH_REQUIRED) : false, // Set to true if authentication is required for all routes
-        auth0Logout: true, // Set to true to enable logout with Auth0
-        routes: {
-            callback: '/auth/callback', // Indicating the endpoint where your application will handle the callback from the authentication provider after a user has been authenticated.
-            login: false, // Dedicated route in your application for user login.
-            logout: '/logout', // Indicating the endpoint where your application will handle user logout requests.
-        },
-    },
-};
+const OIDC = config.oidc;
 
 // Custom middleware function for OIDC authentication
 function OIDCAuth(req, res, next) {
     if (OIDC.enabled) {
+        function handleHostProtected(req) {
+            if (!hostCfg.protected) return;
+
+            const ip = authHost.getIP(req);
+            hostCfg.authenticated = true;
+            authHost.setAuthorizedIP(ip, true);
+            // Check...
+            log.debug('OIDC ------> Host protected', {
+                authenticated: hostCfg.authenticated,
+                authorizedIPs: authHost.getAuthorizedIPs(),
+            });
+        }
+
+        if (req.oidc.isAuthenticated()) {
+            log.debug('OIDC ------> User already Authenticated');
+            handleHostProtected(req);
+            return next();
+        }
+
         // Apply requiresAuth() middleware conditionally
         requiresAuth()(req, res, function () {
-            log.debug('[OIDC] ------> requiresAuth');
+            log.debug('OIDC ------> requiresAuth');
             // Check if user is authenticated
             if (req.oidc.isAuthenticated()) {
                 log.debug('[OIDC] ------> User isAuthenticated');
-                // User is authenticated
-                if (hostCfg.protected) {
-                    const ip = authHost.getIP(req);
-                    hostCfg.authenticated = true;
-                    authHost.setAuthorizedIP(ip, true);
-                    // Check...
-                    log.debug('[OIDC] ------> Host protected', {
-                        authenticated: hostCfg.authenticated,
-                        authorizedIPs: authHost.getAuthorizedIPs(),
-                        activeRoom: authHost.isRoomActive(),
-                    });
-                }
+                handleHostProtected(req);
                 next();
             } else {
                 // User is not authenticated
@@ -337,12 +527,21 @@ function OIDCAuth(req, res, next) {
     }
 }
 
-// stats configuration
-const statsData = {
-    enabled: process.env.STATS_ENABLED ? getEnvBoolean(process.env.STATS_ENABLED) : true,
-    src: process.env.STATS_SCR || 'https://stats.mirotalk.com/script.js',
-    id: process.env.STATS_ID || 'c7615aa7-ceec-464a-baba-54cb605d7261',
+// Mattermost config
+const mattermostCfg = {
+    enabled: config.mattermost.enabled,
+    server_url: config.mattermost.serverUrl,
+    username: config.mattermost.username,
+    password: config.mattermost.password,
+    token: config.mattermost.token,
+    roomTokenExpire: config.mattermost.roomTokenExpire,
+    encryptionKey: jwtKeys.mattermost,
+    security: hostCfg.protected || OIDC.enabled,
+    api_disabled: api_disabled,
 };
+
+// stats configuration
+const statsData = config.stats;
 
 // directory
 const dir = {
@@ -350,26 +549,97 @@ const dir = {
 };
 // html views
 const views = {
-    about: path.join(__dirname, '../../', 'public/views/about.html'),
     client: path.join(__dirname, '../../', 'public/views/client.html'),
     landing: path.join(__dirname, '../../', 'public/views/landing.html'),
     login: path.join(__dirname, '../../', 'public/views/login.html'),
     newCall: path.join(__dirname, '../../', 'public/views/newcall.html'),
     notFound: path.join(__dirname, '../../', 'public/views/404.html'),
     privacy: path.join(__dirname, '../../', 'public/views/privacy.html'),
+    activeRooms: path.join(__dirname, '../../', 'public/views/activeRooms.html'),
+    customizeRoom: path.join(__dirname, '../../', 'public/views/customizeRoom.html'),
     stunTurn: path.join(__dirname, '../../', 'public/views/testStunTurn.html'),
+    waitingRoom: path.join(__dirname, '../../', 'public/views/waitingRoom.html'),
 };
+
+// Branding configuration
+const brandHtmlInjection = config.brand?.htmlInjection ?? true;
+
+// File to cache and inject custom HTML data like OG tags and any other elements.
+const filesPath = [
+    views.landing,
+    views.newCall,
+    views.client,
+    views.login,
+    views.activeRooms,
+    views.customizeRoom,
+    views.waitingRoom,
+];
+const htmlInjector = new HtmlInjector(filesPath, config.brand || null);
 
 const channels = {}; // collect channels
 const sockets = {}; // collect sockets
 const peers = {}; // collect peers info grp by channels
 const presenters = {}; // collect presenters grp by channels
+const wbLocks = {}; // server-authoritative whiteboard lock state grp by channels
+const wbParticipantNames = {}; // presenter-controlled whiteboard participant attribution state grp by channels
+const videoTextAnnotations = {}; // persistent screen text annotation state grp by channels
+const videoDrawingAnnotations = {}; // persistent screen drawing annotation state grp by channels
+const videoDrawingPermissions = {};
+
+const roomMetaKeys = new Set(['lock', 'password', 'joinLock']);
+
+function getPeerCount(roomId) {
+    if (!peers[roomId]) return 0;
+    return Object.keys(peers[roomId]).filter((k) => !roomMetaKeys.has(k)).length;
+}
+
+app.set('trust proxy', trustProxy); // Enables trust for proxy headers (e.g., X-Forwarded-For) based on the trustProxy setting
+
+// Guardrail: IP_WHITELIST_ENABLED=true without TRUST_PROXY=true is almost always a
+// misconfiguration. Refuse to start unless explicitly acknowledged via
+// IP_WHITELIST_ALLOW_UNTRUSTED_PROXY=true (then only the direct socket IP is matched).
+if (ipWhitelist.enabled && !trustProxy) {
+    const optIn = String(process.env.IP_WHITELIST_ALLOW_UNTRUSTED_PROXY || '').toLowerCase() === 'true';
+    if (!optIn) {
+        log.error(
+            'IP_WHITELIST_ENABLED=true requires TRUST_PROXY=true so that the real client IP can be resolved from a trusted reverse proxy. ' +
+                'Without it, X-Forwarded-For is attacker-controlled and the allow-list can be bypassed. ' +
+                'If this instance has no proxy in front and you understand that only direct socket addresses will be evaluated, ' +
+                'set IP_WHITELIST_ALLOW_UNTRUSTED_PROXY=true to acknowledge.',
+            { trustProxy, ipWhitelist }
+        );
+        process.exit(1);
+    }
+    log.warn(
+        'IP_WHITELIST_ENABLED=true with TRUST_PROXY=false (acknowledged): X-Forwarded-For will be ignored and only the direct socket address is checked.'
+    );
+}
+
+app.use(helmet.noSniff()); // Enable content type sniffing prevention
+app.use(applyEmbedHeaders); // Apply iframe embedding restrictions (CSP frame-ancestors / X-Frame-Options)
+
+// Compress all HTTP responses (including static files) using GZip; must be registered before express.static
+app.use(compression());
+
+// Use all static files from the public folder
+const staticOptions = {
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.js')) {
+            res.setHeader('Content-Type', 'application/javascript');
+        }
+        // Add other headers if needed...
+    },
+};
+
+// Serve static files from root (/)
+app.use(express.static(dir.public, staticOptions));
+
+// Also serve the same files under /mattermost
+app.use('/mattermost', express.static(dir.public, staticOptions));
 
 app.use(cors(corsOptions)); // Enable CORS with options
-app.use(compression()); // Compress all HTTP responses using GZip
-app.use(express.json()); // Api parse body data as json
-app.use(express.static(dir.public)); // Use all static files from the public folder
-app.use(bodyParser.urlencoded({ extended: true })); // Need for Slack API body parser
+app.use(express.json()); // Parse JSON bodies
+app.use(express.urlencoded({ extended: false })); // Parse URL-encoded bodies
 app.use(apiBasePath + '/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument)); // api docs
 
 // Restrict access to specified IP
@@ -385,36 +655,30 @@ app.use((req, res, next) => {
     }
 });
 
-// Logs requests
 app.use((req, res, next) => {
+    const ipAddress = getIP(req);
     log.debug('New request:', {
-        // headers: req.headers,
-        body: req.body,
+        ip: ipAddress,
         method: req.method,
         path: req.originalUrl,
+        body: req.body,
+        //headers: req.headers,
     });
     next();
 });
 
-// POST start from here...
-app.post('*', function (next) {
-    next();
-});
-
-// GET start from here...
-app.get('*', function (next) {
-    next();
-});
+// Mattermost
+const mattermost = new MattermostController(app, mattermostCfg, htmlInjector, views.client);
 
 // Remove trailing slashes in url handle bad requests
 app.use((err, req, res, next) => {
-    if (err instanceof SyntaxError || err.status === 400 || 'body' in err) {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
         log.error('Request Error', {
             header: req.headers,
             body: req.body,
             error: err.message,
         });
-        return res.status(400).send({ status: 404, message: err.message }); // Bad request
+        return res.status(400).send({ status: 400, message: 'Invalid JSON' }); // Bad request
     }
     if (req.path.substr(-1) === '/' && req.path.length > 1) {
         let query = req.url.slice(req.path.length);
@@ -424,22 +688,74 @@ app.use((err, req, res, next) => {
     }
 });
 
-// OpenID Connect
+// OpenID Connect - Cache auth() middleware instead of re-creating per request
 if (OIDC.enabled) {
-    try {
+    if (OIDC.baseUrlDynamic) {
+        // Build an allowlist of origins permitted to be used as the OIDC baseURL.
+        // This prevents Host-header injection from rewriting the redirect_uri
+        // (see: https://portswigger.net/web-security/host-header).
+        // Sources, in order of precedence:
+        //   1. config.oidc.allowedDynamicBaseURLs (string[] of full origins)
+        //   2. config.oidc.config.baseURL (always trusted)
+        const configuredAllowlist = Array.isArray(OIDC.allowedDynamicBaseURLs) ? OIDC.allowedDynamicBaseURLs : [];
+        const allowedOrigins = new Set(
+            [OIDC.config?.baseURL, ...configuredAllowlist]
+                .filter(Boolean)
+                .map((u) => {
+                    try {
+                        return new URL(u).origin;
+                    } catch {
+                        return null;
+                    }
+                })
+                .filter(Boolean)
+        );
+
+        // Cache a middleware instance per host
+        const authMiddlewareCache = new Map();
+
+        app.use((req, res, next) => {
+            const host = req.headers.host;
+            const protocol = req.protocol === 'https' ? 'https' : 'http';
+            const cacheKey = `${protocol}://${host}`;
+
+            // Reject Host headers that are not in the configured allowlist.
+            // Without this, an attacker can force the OIDC library to emit a
+            // redirect_uri pointing to an attacker-controlled domain.
+            if (!allowedOrigins.has(cacheKey)) {
+                log.warn('OIDC Host header not in allowlist - rejecting request', {
+                    host,
+                    origin: cacheKey,
+                    allowed: [...allowedOrigins],
+                });
+                return res.status(400).send('Bad Request: invalid Host header');
+            }
+
+            if (!authMiddlewareCache.has(cacheKey)) {
+                const config = { ...OIDC.config, baseURL: cacheKey };
+                authMiddlewareCache.set(cacheKey, auth(config));
+            }
+
+            try {
+                authMiddlewareCache.get(cacheKey)(req, res, next);
+            } catch (err) {
+                log.error('OIDC Auth Middleware Error', err);
+                process.exit(1);
+            }
+        });
+    } else {
+        // Static baseURL: create the middleware once
         app.use(auth(OIDC.config));
-    } catch (err) {
-        log.error(err);
-        process.exit(1);
     }
 }
 
 // Route to display user information
 app.get('/profile', OIDCAuth, (req, res) => {
     if (OIDC.enabled) {
+        log.debug('OIDC User profile requested', req.oidc.user);
         return res.json(req.oidc.user); // Send user information as JSON
     }
-    res.sendFile(views.notFound);
+    return res.json({ profile: false });
 });
 
 // Authentication Callback Route
@@ -461,7 +777,6 @@ app.get('/logout', (req, res) => {
             log.debug('[OIDC] ------> Logout', {
                 authenticated: hostCfg.authenticated,
                 authorizedIPs: authHost.getAuthorizedIPs(),
-                activeRoom: authHost.isRoomActive(),
             });
         }
         req.logout(); // Logout user
@@ -470,46 +785,44 @@ app.get('/logout', (req, res) => {
 });
 
 // main page
-app.get(['/'], OIDCAuth, (req, res) => {
-    if ((!OIDC.enabled && hostCfg.protected && !hostCfg.authenticated) || authHost.isRoomActive()) {
-        const ip = getIP(req);
-        if (allowedIP(ip)) {
-            res.sendFile(views.landing);
-            hostCfg.authenticated = true;
-        } else {
-            hostCfg.authenticated = false;
-            res.sendFile(views.login);
-        }
+app.get('/', OIDCAuth, (req, res) => {
+    if (!OIDC.enabled && hostCfg.protected) {
+        hostCfg.authenticated = false;
+        res.redirect('/login');
     } else {
-        res.sendFile(views.landing);
+        return htmlInjector.injectHtml(views.landing, res);
     }
 });
 
 // set new room name and join
-app.get(['/newcall'], OIDCAuth, (req, res) => {
-    if ((!OIDC.enabled && hostCfg.protected && !hostCfg.authenticated) || authHost.isRoomActive()) {
-        const ip = getIP(req);
-        if (allowedIP(ip)) {
-            res.sendFile(views.newCall);
-            hostCfg.authenticated = true;
-        } else {
-            hostCfg.authenticated = false;
-            res.sendFile(views.login);
-        }
+app.get('/newcall', OIDCAuth, (req, res) => {
+    if (!OIDC.enabled && hostCfg.protected) {
+        hostCfg.authenticated = false;
+        res.redirect('/login');
     } else {
-        res.sendFile(views.newCall);
+        htmlInjector.injectHtml(views.newCall, res);
     }
 });
 
+// Get Active rooms
+app.get('/activeRooms', OIDCAuth, (req, res) => {
+    htmlInjector.injectHtml(views.activeRooms, res);
+});
+
+// Get Custom room
+app.get('/customizeRoom', OIDCAuth, (req, res) => {
+    htmlInjector.injectHtml(views.customizeRoom, res);
+});
+
 // Get stats endpoint
-app.get(['/stats'], (req, res) => {
+app.get('/stats', (req, res) => {
     //log.debug('Send stats', statsData);
     res.send(statsData);
 });
 
-// mirotalk about
+// MiroTalk P2P documentation
 app.get(['/about'], (req, res) => {
-    res.sendFile(views.about);
+    res.redirect(301, 'https://docs.mirotalk.com/mirotalk-p2p/');
 });
 
 // privacy policy
@@ -518,11 +831,119 @@ app.get(['/privacy'], (req, res) => {
 });
 
 // test Stun and Turn connections
-app.get(['/test'], (req, res) => {
+app.get(['/icetest'], (req, res) => {
     if (Object.keys(req.query).length > 0) {
         log.debug('Request Query', req.query);
     }
     res.sendFile(views.stunTurn);
+});
+
+// Check if room active (exists)
+app.post('/isRoomActive', (req, res) => {
+    const { roomId } = checkXSS(req.body);
+
+    if (roomId && (hostCfg.protected || hostCfg.user_auth || OIDC.enabled)) {
+        const roomActive = Object.prototype.hasOwnProperty.call(peers, roomId);
+        if (roomActive) log.debug('isRoomActive', { roomId, roomActive });
+        res.status(200).json({ message: roomActive });
+    } else {
+        res.status(400).json({ message: 'Unauthorized' });
+    }
+});
+
+// Check if Widget room active (exists)
+app.post('/isWidgetRoomActive', (req, res) => {
+    const { roomId } = checkXSS(req.body);
+    const roomWidgetActive =
+        roomId && roomId === config.brand?.widget?.roomId && Object.prototype.hasOwnProperty.call(peers, roomId);
+    log.debug('isWidgetRoomActive', { roomId, roomWidgetActive });
+    res.status(200).json({ message: roomWidgetActive });
+});
+
+// Issue a short-lived token that authorizes the Socket.IO `join` event to open this room.
+// It applies the same room creation policy as the HTTP join routes (OIDC session).
+app.get('/createRoomToken', createRoomTokenLimiter, (req, res) => {
+    const { room } = checkXSS(req.query);
+
+    if (!room || !Validate.isValidRoomName(room)) {
+        return res.status(400).json({ message: 'Invalid room' });
+    }
+
+    res.set('Cache-Control', 'no-store');
+
+    if (!OIDC.enabled) {
+        return res.json({ required: false, token: null });
+    }
+
+    // Creation policy only: ignore whether the room currently exists
+    const creationPeers = Object.fromEntries(Object.entries(peers).filter(([id]) => id !== room));
+
+    if (!isAllowedRoomAccess('/createRoomToken', req, hostCfg, creationPeers, room)) {
+        log.warn('Room creation token denied', { room });
+        return res.status(403).json({ required: true, token: null });
+    }
+
+    return res.json({ required: true, token: createCreateRoomToken(room) });
+});
+
+// Issue a short-lived token proving the OIDC session is a configured presenter (PRESENTERS matched
+// against the verified email or sub, or '*' for any authenticated OIDC user). The Socket.IO `join` event validates it for this room.
+app.get('/oidcPresenterToken', (req, res) => {
+    const { room } = checkXSS(req.query);
+
+    if (!room || !Validate.isValidRoomName(room)) {
+        return res.status(400).json({ message: 'Invalid room' });
+    }
+
+    res.set('Cache-Control', 'no-store');
+
+    if (!OIDC.enabled || !req.oidc?.isAuthenticated?.()) {
+        return res.json({ token: null });
+    }
+
+    if (!isOidcConfiguredPresenter(req.oidc.user, roomPresenters)) {
+        return res.json({ token: null });
+    }
+
+    return res.json({ token: createOidcPresenterToken(room) });
+});
+
+// Issue a short-lived token with the display name verified by the OIDC provider, so the client
+// can show it read-only and the Socket.IO `join` event can enforce it (OIDC_LOCK_USERNAME).
+app.get('/oidcIdentity', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    if (!OIDC.enabled || !OIDC.lockUsername || !req.oidc?.isAuthenticated()) {
+        return res.json({ locked: false });
+    }
+
+    const user = req.oidc.user || {};
+    const rawName = [user.name, user.nickname, user.email].find((v) => typeof v === 'string' && v.trim());
+    const name = rawName ? String(checkXSS(rawName.trim())).slice(0, 254) : '';
+
+    if (!name) return res.json({ locked: false });
+
+    return res.json({ locked: true, name, token: createIdentityToken(name) });
+});
+
+// Display name configured for the HOST_USERS login in the Bearer peer token. The Socket.IO `join` event
+// enforces it from the token itself; this only lets the client show it read-only.
+app.get('/hostIdentity', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+    if (!token || !(await isValidToken(token))) return res.json({ locked: false });
+
+    try {
+        const { username, password } = checkXSS(decodeToken(token));
+        const hostUser = getAuthPeer(username, password);
+        if (!hostUser?.displayname) return res.json({ locked: false });
+        return res.json({ locked: true, name: String(checkXSS(hostUser.displayname)).slice(0, 254) });
+    } catch {
+        return res.json({ locked: false });
+    }
 });
 
 // Handle Direct join room with params
@@ -530,19 +951,28 @@ app.get('/join/', async (req, res) => {
     if (Object.keys(req.query).length > 0) {
         log.debug('Request Query', req.query);
         /* 
-            http://localhost:3000/join?room=test&name=mirotalk&audio=1&video=1&screen=0&notify=0&hide=0
-            https://p2p.mirotalk.com/join?room=test&name=mirotalk&audio=1&video=1&screen=0&notify=0&hide=0
-            https://mirotalk.up.railway.app/join?room=test&name=mirotalk&audio=1&video=1&screen=0&notify=0&hide=0
+            http://localhost:3000/join?room=test&name=mirotalk&audio=1&video=1&screen=0&chat=1&notify=0&hide=0
+            https://p2p.mirotalk.com/join?room=test&name=mirotalk&audio=1&video=1&screen=0&chat=1&notify=0&hide=0&duration=00:00:30
+            https://mirotalk.up.railway.app/join?room=test&name=mirotalk&audio=1&video=1&screen=0&chat=1&notify=0&hide=0
         */
-        const { room, name, audio, video, screen, notify, hide, token } = checkXSS(req.query);
+        const { room, name, audio, video, screen, chat, notify, hide, duration, token } = checkXSS(req.query);
 
-        const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+        if (!room) {
+            log.warn('/join/params room empty', room);
+            return res.status(401).json({ message: 'Direct Room Join: Missing mandatory room parameter!' });
+        }
 
-        log.debug('Direct Join', {
-            OIDCUserAuthenticated: OIDCUserAuthenticated,
-            authenticated: hostCfg.authenticated,
-            host_protected: hostCfg.protected,
-        });
+        if (!Validate.isValidRoomName(room)) {
+            return res.status(400).json({
+                message: 'Invalid Room name!\nPath traversal pattern detected!',
+            });
+        }
+
+        const allowRoomAccess = isAllowedRoomAccess('/join/params', req, hostCfg, peers, room);
+
+        if (!allowRoomAccess && !token) {
+            return res.status(401).json({ message: 'Direct Room Join Unauthorized' });
+        }
 
         let peerUsername,
             peerPassword = '';
@@ -564,15 +994,25 @@ app.get('/join/', async (req, res) => {
                 peerUsername = username;
                 peerPassword = password;
                 // Check if valid peer
-                isPeerValid = isAuthPeer(username, password);
+                const hostUser = getAuthPeer(username, password);
+                isPeerValid = !!hostUser;
                 // Check if presenter
                 isPeerPresenter = presenter === '1' || presenter === 'true';
+                // HOST_USERS allowed_rooms: this login can't be used for this room
+                if (hostUser && !isRoomAllowedForUser(hostUser, room)) {
+                    log.warn('Direct Room Join not allowed for this user', { username, room });
+                    return res.status(403).json({ message: 'Room not allowed for this user' });
+                }
             } catch (err) {
                 // Invalid token
                 log.error('Direct Join JWT error', err.message);
-                return hostCfg.protected || hostCfg.user_auth ? res.sendFile(views.login) : res.sendFile(views.landing);
+                return hostCfg.protected || hostCfg.user_auth
+                    ? htmlInjector.injectHtml(views.login, res)
+                    : htmlInjector.injectHtml(views.landing, res);
             }
         }
+
+        const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
 
         // Peer valid going to auth as host
         if ((hostCfg.protected && isPeerValid && isPeerPresenter && !hostCfg.authenticated) || OIDCUserAuthenticated) {
@@ -589,73 +1029,96 @@ app.get('/join/', async (req, res) => {
         // Check if peer authenticated or valid
         if (room && (hostCfg.authenticated || isPeerValid)) {
             // only room mandatory
-            return res.sendFile(views.client);
+            return htmlInjector.injectHtml(views.client, res);
         } else {
-            return res.sendFile(views.login);
+            return htmlInjector.injectHtml(views.login, res);
         }
     }
 });
 
 // Join Room by id
 app.get('/join/:roomId', function (req, res) {
-    // log.debug('Join to room', { roomId: req.params.roomId });
-    const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+    //
+    const { roomId } = req.params;
 
-    if (OIDCUserAuthenticated || hostCfg.authenticated || authHost.isRoomActive()) {
-        log.debug('/join/room', {
-            OIDCUserAuthenticated: OIDCUserAuthenticated,
-            authenticated: hostCfg.authenticated,
-            host_protected: hostCfg.protected,
-            activeRoom: authHost.isRoomActive(),
-        });
+    if (!roomId) {
+        log.warn('/join/:roomId empty', roomId);
+        return res.redirect('/');
+    }
 
-        if (hostCfg.protected) authHost.setRoomActive();
+    if (!Validate.isValidRoomName(roomId)) {
+        log.warn('/join/:roomId invalid', roomId);
+        return res.redirect('/');
+    }
 
-        res.sendFile(views.client);
+    const allowRoomAccess = isAllowedRoomAccess('/join/:roomId', req, hostCfg, peers, roomId);
+
+    if (allowRoomAccess) {
+        htmlInjector.injectHtml(views.client, res);
+    } else if (OIDC.enabled || hostCfg.protected) {
+        // Guest arrived before host opened the room — show waiting page
+        htmlInjector.injectHtml(views.waitingRoom, res);
     } else {
-        if (!OIDC.enabled && hostCfg.protected) {
-            return res.sendFile(views.login);
-        }
         res.redirect('/');
     }
 });
 
 // Not specified correctly the room id
-app.get('/join/*', function (req, res) {
+app.get('/join/\\*', function (req, res) {
     res.redirect('/');
 });
 
 // Login
 app.get(['/login'], (req, res) => {
-    res.sendFile(views.login);
+    if (hostCfg.protected || hostCfg.user_auth) {
+        return htmlInjector.injectHtml(views.login, res);
+    }
+    res.redirect('/');
 });
 
 // Logged
-app.get(['/logged'], (req, res) => {
-    const ip = getIP(req);
-    if (allowedIP(ip)) {
-        res.sendFile(views.landing);
+app.get('/logged', (req, res) => {
+    if (!OIDC.enabled && hostCfg.protected) {
+        const ip = getIP(req);
+        if (allowedIP(ip)) {
+            res.redirect('/');
+        } else {
+            hostCfg.authenticated = false;
+            res.redirect('/login');
+        }
     } else {
-        hostCfg.authenticated = false;
-        res.sendFile(views.login);
+        res.redirect('/');
     }
 });
 
 /* AXIOS */
 
 // handle login on host protected
-app.post(['/login'], (req, res) => {
+app.post('/login', loginLimiter, (req, res) => {
     //
     const ip = getIP(req);
     log.debug(`Request login to host from: ${ip}`, req.body);
 
-    const { username, password } = checkXSS(req.body);
+    const safeBody = checkXSS(req.body) || {};
+    const { username, password } = safeBody;
 
-    const isPeerValid = isAuthPeer(username, password);
+    if (!username || !password) {
+        log.warn('Login failed: missing username or password', req.body);
+        return res.status(400).json({ message: 'Missing username or password' });
+    }
+
+    if (!Validate.isValidPassword(password)) {
+        log.warn('Login failed: invalid password length', { ip });
+        return res.status(400).json({ message: 'Invalid password' });
+    }
+
+    const hostUser = getAuthPeer(username, password);
+    const isPeerValid = !!hostUser;
+    const displayname = hostUser?.displayname || username;
+    const allowedRooms = hostUser?.allowed_rooms || [];
 
     // Peer valid going to auth as host
     if (hostCfg.protected && isPeerValid && !hostCfg.authenticated) {
-        const ip = getIP(req);
         hostCfg.authenticated = true;
         authHost.setAuthorizedIP(ip, true);
         log.debug('HOST LOGIN OK', {
@@ -664,7 +1127,7 @@ app.post(['/login'], (req, res) => {
             authorizedIps: authHost.getAuthorizedIPs(),
         });
         const token = encodeToken({ username: username, password: password, presenter: true });
-        return res.status(200).json({ message: token });
+        return res.status(200).json({ message: token, displayname, allowedRooms });
     }
 
     // Peer auth valid
@@ -672,10 +1135,38 @@ app.post(['/login'], (req, res) => {
         log.debug('PEER LOGIN OK', { ip: ip, authorized: true });
         const isPresenter = roomPresenters && roomPresenters.includes(username).toString();
         const token = encodeToken({ username: username, password: password, presenter: isPresenter });
-        return res.status(200).json({ message: token });
+        return res.status(200).json({ message: token, displayname, allowedRooms });
     } else {
         return res.status(401).json({ message: 'unauthorized' });
     }
+});
+
+// UI buttons configuration
+app.get('/buttons', (req, res) => {
+    res.status(200).json({ message: config.buttons ? config.buttons : false });
+});
+
+// UI themes configuration
+app.get('/themes', (req, res) => {
+    res.status(200).json({ message: config.themes ? config.themes : false });
+});
+
+// UI brand configuration
+app.get('/brand', (req, res) => {
+    res.status(200).json({ message: config.brand && brandHtmlInjection ? config.brand : false });
+});
+
+// Join roomId redirect to /join?room=roomId
+app.get('/:roomId', (req, res) => {
+    const { roomId } = checkXSS(req.params);
+
+    if (!roomId) {
+        log.warn('/:roomId empty', roomId);
+        return res.redirect('/');
+    }
+
+    log.debug('Detected roomId --> redirect to /join?room=roomId');
+    res.redirect(`/join/${roomId}`);
 });
 
 /**
@@ -683,8 +1174,44 @@ app.post(['/login'], (req, res) => {
     For api docs we use: https://swagger.io/
 */
 
+// request stats list
+app.get(`${apiBasePath}/stats`, (req, res) => {
+    // Check if endpoint allowed
+    if (api_disabled.includes('stats')) {
+        return res.status(403).json({
+            error: 'This endpoint has been disabled. Please contact the administrator for further information.',
+        });
+    }
+    // check if user was authorized for the api call
+    const { host, authorization } = req.headers;
+    const api = new ServerApi(host, authorization, api_key_secret);
+    if (!api.isAuthorized()) {
+        log.debug('MiroTalk get stats - Unauthorized', {
+            header: req.headers,
+            body: req.body,
+        });
+        return res.status(403).json({ error: 'Unauthorized!' });
+    }
+    // Get stats
+    const { timestamp, totalRooms, totalPeers } = api.getStats(peers);
+    res.json({
+        success: true,
+        timestamp,
+        totalRooms,
+        totalPeers,
+    });
+    // log.debug the output if all done
+    log.debug('MiroTalk get stats - Authorized', {
+        header: req.headers,
+        body: req.body,
+        timestamp,
+        totalRooms,
+        totalPeers,
+    });
+});
+
 // request token endpoint
-app.post([`${apiBasePath}/token`], (req, res) => {
+app.post(`${apiBasePath}/token`, (req, res) => {
     // Check if endpoint allowed
     if (api_disabled.includes('token')) {
         return res.status(403).json({
@@ -713,7 +1240,7 @@ app.post([`${apiBasePath}/token`], (req, res) => {
 });
 
 // request meetings list
-app.get([`${apiBasePath}/meetings`], (req, res) => {
+app.get(`${apiBasePath}/meetings`, (req, res) => {
     // Check if endpoint allowed
     if (api_disabled.includes('meetings')) {
         return res.status(403).json({
@@ -742,7 +1269,7 @@ app.get([`${apiBasePath}/meetings`], (req, res) => {
 });
 
 // API request meeting room endpoint
-app.post([`${apiBasePath}/meeting`], (req, res) => {
+app.post(`${apiBasePath}/meeting`, (req, res) => {
     // Check if endpoint allowed
     if (api_disabled.includes('meeting')) {
         return res.status(403).json({
@@ -768,7 +1295,7 @@ app.post([`${apiBasePath}/meeting`], (req, res) => {
 });
 
 // API request join room endpoint
-app.post([`${apiBasePath}/join`], (req, res) => {
+app.post(`${apiBasePath}/join`, (req, res) => {
     // Check if endpoint allowed
     if (api_disabled.includes('join')) {
         return res.status(403).json({
@@ -798,7 +1325,7 @@ app.post([`${apiBasePath}/join`], (req, res) => {
     https://api.slack.com/authentication/verifying-requests-from-slack
 */
 
-//Slack request meeting room endpoint
+// Slack request meeting room endpoint
 app.post('/slack', (req, res) => {
     if (!slackEnabled) return res.end('`Under maintenance` - Please check back soon.');
 
@@ -842,11 +1369,56 @@ function getMeetingURL(host) {
     return 'http' + (host.includes('localhost') ? '' : 's') + '://' + host + '/join/' + uuidV4();
 }
 
+// request active rooms endpoint
+app.get(`${apiBasePath}/activeRooms`, (req, res) => {
+    // Check if endpoint allowed
+    if (!hostCfg.showActiveRooms) {
+        return res.status(403).json({
+            error: 'This endpoint has been disabled. Please contact the administrator for further information.',
+        });
+    }
+    // Public endpoint gated only by config.ui.rooms.showActive: when enabled it
+    // intentionally returns the active rooms list without authorization so the
+    // event-zone dashboard (/activeRooms) can display it.
+    const { host } = req.headers;
+    const api = new ServerApi(host);
+
+    // Get active rooms
+    const activeRooms = api.getActiveRooms(peers);
+    res.json({ activeRooms: activeRooms });
+
+    // log.debug the output if all done
+    log.debug('MiroTalk get active rooms - Authorized', {
+        header: req.headers,
+        body: req.body,
+        activeRooms: activeRooms,
+    });
+});
+
 // end of MiroTalk API v1
 
 // not match any of page before, so 404 not found
-app.get('*', function (req, res) {
+app.use((req, res) => {
     res.sendFile(views.notFound);
+});
+
+// Global error handler for URIError and other errors
+app.use((err, req, res, next) => {
+    if (err instanceof URIError) {
+        log.warn('Malformed URI detected', {
+            url: req.url,
+            ip: getIP(req),
+            error: err.message,
+        });
+        return res.status(400).send({ status: 400, message: 'Invalid URL encoding' });
+    }
+    // Handle other errors
+    log.error('Unhandled error', {
+        url: req.url,
+        error: err.message,
+        stack: err.stack,
+    });
+    res.status(500).send({ status: 500, message: 'Internal server error' });
 });
 
 /**
@@ -856,35 +1428,63 @@ app.get('*', function (req, res) {
  */
 function getServerConfig(tunnel = false) {
     return {
-        iceServers: iceServers,
-        stats: statsData,
-        oidc: OIDC.enabled ? OIDC : false,
-        host: hostCfg,
-        jwtCfg: jwtCfg,
-        presenters: roomPresenters,
-        ip_whitelist: ipWhitelist,
-        ngrok: {
-            ngrok_enabled: ngrokEnabled,
-            ngrok_token: ngrokEnabled ? ngrokAuthToken : '',
-        },
-        cors: corsOptions,
-        server_tunnel: tunnel,
+        // General Server Information
         server: host,
-        test_ice_servers: testStunTurn,
+        server_tunnel: tunnel,
+        trust_proxy: trustProxy,
         api_docs: api_docs,
+
+        // Core Configurations
+        jwtCfg: jwtCfg,
+        cors: corsOptions,
+        embed: {
+            allowedOrigins: embedAllowedOrigins.length ? embedAllowedOrigins : 'any',
+            csp: embedCsp ? embedCsp.csp : 'not set (embedding allowed from any origin)',
+        },
+        iceServers: iceServers,
+        test_ice_servers: testStunTurn,
+        email: nodemailer.emailCfg.alert ? nodemailer.emailCfg : false,
+
+        // Security, Authorization, and User Management
+        oidc: OIDC.enabled ? OIDC : false,
+        host_protected: hostCfg.protected || hostCfg.user_auth ? hostCfg : false,
+        presenters: roomPresenters,
+        ip_whitelist: ipWhitelist.enabled ? ipWhitelist : false,
         api_key_secret: api_key_secret,
-        use_self_signed_certificate: isHttps,
+
+        // Media and Connection Settings
         turn_enabled: turnServerEnabled,
         ip_lookup_enabled: IPLookupEnabled,
-        chatGPT_enabled: configChatGPT.enabled,
+
+        // Integrations
+        chatGPT_enabled: configChatGPT.enabled ? configChatGPT : false,
         slack_enabled: slackEnabled,
+        mattermost_enabled: mattermostCfg.enabled ? mattermostCfg : false,
+        webhook: webhook.enabled ? webhook : false,
+
+        // Monitoring and Logging
         sentry_enabled: sentryEnabled,
-        survey_enabled: surveyEnabled,
-        redirect_enabled: redirectEnabled,
-        survey_url: surveyURL,
-        redirect_url: redirectURL,
-        node_version: process.versions.node,
+        stats: statsData.enabled ? statsData : false,
+
+        // Ngrok Configuration
+        ngrok: ngrokEnabled
+            ? {
+                  enabled: ngrokEnabled,
+                  token: ngrokAuthToken,
+              }
+            : false,
+
+        // URLs for Redirection and Survey
+        survey: surveyEnabled ? surveyURL : false,
+        redirect: redirectEnabled ? redirectURL : false,
+
+        // Widget Configuration
+        widget: config.brand?.widget?.enabled ? config.brand.widget : false,
+
+        // Versions and environment information
+        environment: config.server.environment,
         app_version: packageJson.version,
+        node_version: process.versions.node,
     };
 }
 
@@ -895,13 +1495,12 @@ function getServerConfig(tunnel = false) {
 async function ngrokStart() {
     try {
         await ngrok.authtoken(ngrokAuthToken);
-        await ngrok.connect(port);
-        const api = ngrok.getApi();
-        const list = await api.listTunnels();
-        const tunnel = list.tunnels[0].public_url;
-        log.info('Server config', getServerConfig(tunnel));
+        const listener = await ngrok.forward({ addr: port });
+        const tunnelUrl = listener.url();
+        log.info('Server config', getServerConfig(tunnelUrl));
     } catch (err) {
-        log.warn('[Error] ngrokStart', err.body);
+        log.warn('[Error] ngrokStart', err);
+        await ngrok.kill();
         process.exit(1);
     }
 }
@@ -909,7 +1508,7 @@ async function ngrokStart() {
 /**
  * Start Local Server with ngrok https tunnel (optional)
  */
-server.listen(port, null, () => {
+server.listen(port, null, async () => {
     log.debug(
         `%c
 
@@ -921,14 +1520,22 @@ server.listen(port, null, () => {
 	╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝      ╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝ started...
 
 	`,
-        'font-family:monospace',
+        'font-family:monospace'
     );
 
     // https tunnel
-    if (ngrokEnabled && isHttps === false) {
-        ngrokStart();
+    if (ngrokEnabled) {
+        await ngrokStart();
     } else {
         log.info('Server config', getServerConfig());
+    }
+
+    // Warn if default secrets are still in use
+    if (api_key_secret === 'mirotalkp2p_default_secret') {
+        log.warn('WARNING: API_KEY_SECRET is set to the default value. Change it before deploying!');
+    }
+    if ((hostCfg.protected || hostCfg.user_auth) && !hostCfg.users.length && !OIDC.enabled) {
+        log.warn('WARNING: HOST_USERS is empty, nobody will be able to log in. Set HOST_USERS in .env');
     }
 });
 
@@ -964,12 +1571,12 @@ io.sockets.on('connect', async (socket) => {
     });
 
     /**
-     * On peer diconnected
+     * On peer disconnected
      */
     socket.on('disconnect', async (reason) => {
+        removeIP(socket);
         for (let channel in socket.channels) {
-            removeIP(socket);
-            await removePeerFrom(channel);
+            await removePeerFrom(channel, socket, reason);
         }
         log.debug('[' + socket.id + '] disconnected', { reason: reason });
         delete sockets[socket.id];
@@ -982,6 +1589,9 @@ io.sockets.on('connect', async (socket) => {
         const data = checkXSS(dataObj);
 
         log.debug('Socket Promise', data);
+
+        if (!Validate.isValidData(data)) return;
+
         //...
         const { room_id, peer_id, peer_name, method, params } = data;
 
@@ -998,29 +1608,60 @@ io.sockets.on('connect', async (socket) => {
                 break;
             case 'getChatGPT':
                 // https://platform.openai.com/docs/introduction
+                // Security: only a joined peer of the room may use the ChatGPT proxy.
+                if (!isPeerInRoom(room_id, socket.id)) return cb({ message: 'Room not found' });
                 if (!configChatGPT.enabled) return cb({ message: 'ChatGPT seems disabled, try later!' });
                 // https://platform.openai.com/docs/api-reference/completions/create
                 try {
                     const { time, prompt, context } = params;
                     // Add the prompt to the context
                     context.push({ role: 'user', content: prompt });
-                    // Call OpenAI's API to generate response
-                    const completion = await chatGPT.chat.completions.create({
-                        model: configChatGPT.model || 'gpt-3.5-turbo',
-                        messages: context,
-                        max_tokens: configChatGPT.max_tokens || 1000,
-                        temperature: configChatGPT.temperature || 0,
-                    });
+
+                    // Prevent memory leak: Limit context size to last 20 messages (10 exchanges)
+                    const MAX_CONTEXT_MESSAGES = 20;
+                    if (context.length > MAX_CONTEXT_MESSAGES) {
+                        // Keep the system message (if exists) and the most recent messages
+                        const systemMessage = context[0]?.role === 'system' ? [context[0]] : [];
+                        const recentMessages = context.slice(-MAX_CONTEXT_MESSAGES);
+                        context.length = 0; // Clear array
+                        context.push(...systemMessage, ...recentMessages);
+                    }
+
+                    // Call OpenAI's API to generate response (with retry on transient 5xx errors)
+                    const MAX_RETRIES = 3;
+                    let completion;
+                    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                        try {
+                            completion = await chatGPT.chat.completions.create(getChatGPTParams(context));
+                            break; // success
+                        } catch (retryError) {
+                            const isTransient = retryError.status >= 500 && retryError.status < 600;
+                            if (isTransient && attempt < MAX_RETRIES) {
+                                const delay = Math.pow(2, attempt) * 500; // 1s, 2s backoff
+                                log.warn(
+                                    `ChatGPT transient error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms`,
+                                    {
+                                        status: retryError.status,
+                                        message: retryError.message,
+                                    }
+                                );
+                                await new Promise((resolve) => setTimeout(resolve, delay));
+                            } else {
+                                throw retryError;
+                            }
+                        }
+                    }
                     // Extract message from completion
                     const message = completion.choices[0].message.content.trim();
                     // Add response to context
                     context.push({ role: 'assistant', content: message });
                     // Log conversation details
-                    log.info('ChatGPT', {
+                    log.debug('ChatGPT', {
                         time: time,
                         room: room_id,
                         name: peer_name,
                         context: context,
+                        contextLength: context.length,
                     });
                     // Callback response to client
                     cb({ message: message, context: context });
@@ -1064,6 +1705,8 @@ io.sockets.on('connect', async (socket) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
 
+        if (!Validate.isValidData(config)) return;
+
         // log.debug('Join room', config);
         log.debug('[' + socket.id + '] join ', config);
 
@@ -1071,8 +1714,12 @@ io.sockets.on('connect', async (socket) => {
             channel,
             channel_password,
             peer_uuid,
-            peer_name,
+            peer_name: requested_peer_name,
+            peer_avatar,
             peer_token,
+            create_room_token,
+            identity_token,
+            oidc_presenter_token,
             peer_video,
             peer_audio,
             peer_video_status,
@@ -1082,24 +1729,65 @@ io.sockets.on('connect', async (socket) => {
             peer_rec_status,
             peer_privacy_status,
             peer_info,
+            room_duration,
+            breakout_token,
         } = config;
+
+        if (!Validate.isValidRoomName(channel)) {
+            log.warn('[' + socket.id + '] - Invalid room name', channel);
+            return socket.emit('unauthorized');
+        }
 
         if (channel in socket.channels) {
             return log.debug('[' + socket.id + '] [Warning] already joined', channel);
         }
-        // no channel aka room in channels init
-        if (!(channel in channels)) channels[channel] = {};
 
-        // no channel aka room in peers init
-        if (!(channel in peers)) peers[channel] = {};
+        // Breakout rooms: proof that the server moved this peer to this room
+        const breakoutTicket = getBreakoutTicket(breakout_token, channel, peer_uuid);
+        // In the rooms of an open breakout session, and for peers moved by a ticket, the presenter role
+        // is never granted to the first peer joining (rooms are briefly empty while peers move),
+        // only by the ticket or the config.
+        const grantsFirstJoinPresenter = !breakoutTicket && !RoomBreakouts.isSessionRoom(channel);
 
-        // no presenter aka host in presenters init
-        if (!(channel in presenters)) presenters[channel] = {};
+        // Security: an OIDC-authenticated peer joins with the name verified by the identity provider
+        const verifiedPeerName = getVerifiedIdentityName(identity_token);
+        let peer_name = verifiedPeerName || requested_peer_name;
+        if (verifiedPeerName) {
+            socket.verifiedPeerName = verifiedPeerName;
+            config.peer_name = verifiedPeerName;
+        }
 
         let is_presenter = true;
+        let authenticatedUsername = null;
+        let authenticatedHostUser = null;
+
+        // Is this join opening a brand new room (no presenter/host yet)? Computed from
+        // current state BEFORE any room structure is created, so a rejected join never
+        // leaves an empty room behind (which would otherwise make roomExist true and let
+        // guests bypass host protection over the HTTP /join layer).
+        const isRoomNew = !(channel in presenters) || Object.keys(presenters[channel]).length === 0;
+
+        // Auth is required when global user auth is enabled, when a token is supplied
+        // (always validate it), or when host protection is on and this join would open
+        // a new room. The last case stops unauthenticated Socket.IO clients from creating
+        // protected rooms and becoming presenter, bypassing the HTTP login/waiting-room.
+        const authRequired = hostCfg.user_auth || peer_token || (hostCfg.protected && isRoomNew);
+
+        // Security: enforce the OIDC room creation policy that the HTTP routes apply. A valid
+        // peer_token is validated below, otherwise opening a new room needs a create-room token.
+        if (
+            OIDC.enabled &&
+            isRoomNew &&
+            !peer_token &&
+            !breakoutTicket &&
+            !isCreateRoomTokenValid(create_room_token, channel)
+        ) {
+            log.warn('[' + socket.id + '] Room creation not authorized', { ip: peer_ip, channel });
+            return socket.emit('unauthorized');
+        }
 
         // User Auth required, we check if peer valid
-        if (hostCfg.user_auth || peer_token) {
+        if (authRequired) {
             // Check JWT
             if (peer_token) {
                 try {
@@ -1112,16 +1800,25 @@ io.sockets.on('connect', async (socket) => {
 
                     const { username, password, presenter } = checkXSS(decodeToken(peer_token));
 
-                    const isPeerValid = isAuthPeer(username, password);
+                    const hostUser = getAuthPeer(username, password);
+                    const isPeerValid = !!hostUser;
 
                     if (!isPeerValid) {
                         // redirect peer to login page
                         return socket.emit('unauthorized');
                     }
 
+                    // HOST_USERS allowed_rooms: this login can't be used for this room
+                    // (a breakout ticket is only issued to peers already in the main room)
+                    if (!breakoutTicket && !isRoomAllowedForUser(hostUser, channel)) {
+                        log.warn('[' + socket.id + '] Room not allowed for this user', { username, channel });
+                        return socket.emit('roomNotAllowed');
+                    }
+
                     // Presenter if token 'presenter' is '1'/'true' or first to join room
-                    is_presenter =
-                        presenter === '1' || presenter === 'true' || Object.keys(presenters[channel]).length === 0;
+                    authenticatedUsername = username;
+                    authenticatedHostUser = hostUser;
+                    is_presenter = presenter === '1' || presenter === 'true' || (isRoomNew && grantsFirstJoinPresenter);
 
                     log.debug('[' + socket.id + '] JOIN ROOM - USER AUTH check peer', {
                         ip: peer_ip,
@@ -1135,16 +1832,48 @@ io.sockets.on('connect', async (socket) => {
                     log.error('[' + socket.id + '] [Warning] Join Room JWT error', err.message);
                     return socket.emit('unauthorized');
                 }
-            } else {
+            } else if (!breakoutTicket) {
                 // redirect peer to login page
                 return socket.emit('unauthorized');
             }
         }
 
-        // room locked by the participants can't join
-        if (peers[channel]['lock'] === true && peers[channel]['password'] != channel_password) {
-            log.debug('[' + socket.id + '] [Warning] Room Is Locked', channel);
-            return socket.emit('roomIsLocked');
+        if (breakoutTicket?.presenter) is_presenter = true;
+
+        if (RoomTimeLimit.isReached(channel)) {
+            log.debug('[' + socket.id + '] [Warning] Room has reached its time limit', channel);
+            return socket.emit('roomTimeLimitReached');
+        }
+
+        // Auth passed — safe to create the room structures now
+        if (!(channel in channels)) channels[channel] = {};
+        // A main room emptied by its breakout rooms gets back its state (lock, password, join lock)
+        if (!(channel in peers)) peers[channel] = { ...(RoomBreakouts.takeMainState(channel) || {}) };
+        if (!(channel in presenters)) presenters[channel] = {};
+
+        // Security: a host user with a configured displayname joins with it (OIDC verified name wins)
+        if (!verifiedPeerName && authenticatedHostUser?.displayname) {
+            peer_name = String(checkXSS(authenticatedHostUser.displayname)).slice(0, 254);
+            socket.verifiedPeerName = peer_name;
+            config.peer_name = peer_name;
+        }
+
+        // Proof of an OIDC session listed in PRESENTERS (verified email or sub), bound to this room
+        const oidcPresenter = isOidcPresenterTokenValid(oidc_presenter_token, channel);
+        if (oidcPresenter) is_presenter = true;
+
+        // room locked by the participants can't join (peers moved by a breakout ticket were already in)
+        if (peers[channel]['lock'] === true && !breakoutTicket) {
+            if (RoomPassword.isBlocked(peer_ip, channel)) {
+                log.warn('[' + socket.id + '] [Warning] Room password attempts blocked', { ip: peer_ip, channel });
+                return socket.emit('roomIsLocked');
+            }
+            if (!RoomPassword.passwordMatches(channel_password, peers[channel]['password'])) {
+                RoomPassword.recordFailure(peer_ip, channel);
+                log.debug('[' + socket.id + '] [Warning] Room Is Locked', channel);
+                return socket.emit('roomIsLocked');
+            }
+            RoomPassword.recordSuccess(peer_ip, channel);
         }
 
         // Set the presenters
@@ -1154,25 +1883,72 @@ io.sockets.on('connect', async (socket) => {
             peer_uuid: peer_uuid,
             is_presenter: is_presenter,
         };
-        // first we check if the username match the presenters username
-        if (roomPresenters && roomPresenters.includes(peer_name)) {
+
+        // Recover presenter status only from a disconnected socket. A live
+        // presenter must never lose the role to another connection.
+        for (const [existingPeerID, existingPresenter] of Object.entries(presenters[channel])) {
+            if (
+                existingPeerID !== socket.id &&
+                !sockets[existingPeerID]?.connected &&
+                existingPresenter &&
+                existingPresenter.is_presenter === true &&
+                existingPresenter.peer_name === peer_name &&
+                existingPresenter.peer_uuid === peer_uuid
+            ) {
+                delete presenters[channel][existingPeerID];
+                presenters[channel][socket.id] = presenter;
+                log.debug('[' + socket.id + '] Presenter recovered on reconnect', {
+                    previous_peer_id: existingPeerID,
+                    peer_name: peer_name,
+                });
+                break;
+            }
+        }
+
+        // Match configured presenters against authenticated account names or the OIDC
+        // verified email/sub, never client-selected display names.
+        if (
+            oidcPresenter ||
+            breakoutTicket?.presenter ||
+            (authenticatedUsername && roomPresenters && roomPresenters.includes(authenticatedUsername))
+        ) {
             presenters[channel][socket.id] = presenter;
         } else {
             // if not match the presenters username, the first one join room is the presenter
-            if (Object.keys(presenters[channel]).length === 0) {
+            if (grantsFirstJoinPresenter && Object.keys(presenters[channel]).length === 0) {
                 presenters[channel][socket.id] = presenter;
             }
         }
 
         // Check if peer is presenter, if token check the presenter key
-        const isPresenter = peer_token ? is_presenter : await isPeerPresenter(channel, socket.id, peer_name, peer_uuid);
+        const isPresenter = peer_token ? is_presenter : isPeerPresenter(channel, socket.id, peer_name, peer_uuid);
+
+        // Room locked by the host for new participants, only presenters can still join
+        if (peers[channel]['joinLock'] === true && !isPresenter && !breakoutTicket) {
+            log.debug('[' + socket.id + '] [Warning] Room Is Locked for new participants', channel);
+            delete presenters[channel][socket.id];
+            return socket.emit('roomIsJoinLocked');
+        }
+
+        // Security: only a presenter can start the room-wide time limit (first one wins, can't be changed later)
+        if (
+            isPresenter &&
+            RoomTimeLimit.start(channel, room_duration, {
+                onReached: () => endRoomTimeLimit(channel),
+                onGraceEnd: () => disconnectRoomPeers(channel),
+            })
+        ) {
+            log.info('[' + socket.id + '] Room time limit started', { channel, duration: room_duration });
+            await sendToRoom(channel, socket.id, 'roomTimeLimit', { action: 'start', ...RoomTimeLimit.get(channel) });
+        }
 
         // Some peer info data
-        const { osName, osVersion, browserName, browserVersion } = peer_info;
+        const { osName, osVersion, browserName, browserVersion, extras } = peer_info;
 
         // collect peers info grp by channels
         peers[channel][socket.id] = {
             peer_name: peer_name,
+            peer_avatar: peer_avatar,
             peer_presenter: isPresenter,
             peer_video: peer_video,
             peer_audio: peer_audio,
@@ -1184,22 +1960,34 @@ io.sockets.on('connect', async (socket) => {
             peer_privacy_status: peer_privacy_status,
             os: osName ? `${osName} ${osVersion}` : '',
             browser: browserName ? `${browserName} ${browserVersion}` : '',
+            extras: extras,
         };
 
         const activeRooms = getActiveRooms();
 
-        log.info('[Join] - active rooms and peers count', activeRooms);
+        log.debug('[Join] - active rooms and peers count', activeRooms);
 
-        log.info('[Join] - connected presenters grp by roomId', presenters);
+        log.debug('[Join] - connected presenters grp by roomId', presenters);
 
-        log.info('[Join] - connected peers grp by roomId', peers);
+        log.debug('[Join] - connected peers grp by roomId', peers);
 
         await addPeerTo(channel);
 
+        // Server-bound poll voter identity, never broadcast. peer_uuid is per browser (localStorage), so the
+        // join-time name separates participants sharing a browser while a refresh/reconnect keeps the same vote.
+        socket.pollVoterKey =
+            typeof peer_uuid === 'string' && peer_uuid.length > 0 && peer_uuid.length <= 100
+                ? 'u:' + JSON.stringify([peer_uuid, String(peer_name)])
+                : 's:' + socket.id;
+
         channels[channel][socket.id] = socket;
         socket.channels[channel] = channel;
+        // Breakout tickets are bound to it, and revoked with the socket (kick out)
+        socket.peerUuid = typeof peer_uuid === 'string' ? peer_uuid : '';
+        socket.breakoutTicketIds = new Set(breakoutTicket ? [breakoutTicket.jti] : []);
 
-        const peerCounts = Object.keys(peers[channel]).length;
+        const peerCounts = getPeerCount(channel);
+        const breakoutSession = RoomBreakouts.getByRoom(channel);
 
         // Send some server info to joined peer
         await sendToPeer(socket.id, sockets, 'serverInfo', {
@@ -1207,6 +1995,7 @@ io.sockets.on('connect', async (socket) => {
             host_protected: hostCfg.protected,
             user_auth: hostCfg.user_auth,
             is_presenter: isPresenter,
+            join_locked: peers[channel]['joinLock'] === true,
             survey: {
                 active: surveyEnabled,
                 url: surveyURL,
@@ -1215,8 +2004,36 @@ io.sockets.on('connect', async (socket) => {
                 active: redirectEnabled,
                 url: redirectURL,
             },
+            maxRoomParticipants: hostCfg.maxRoomParticipants,
+            // Breakout rooms run within the main room time limit
+            time_limit:
+                RoomTimeLimit.get(channel) || (breakoutSession ? RoomTimeLimit.get(breakoutSession.mainRoom) : null),
+            // Whisper is exposed as a capability flag + segment length only.
+            // The API key/basePath are server-side secrets and are never sent.
+            whisper: {
+                enabled: configWhisper.enabled,
+                segmentSeconds: configWhisper.segmentSeconds,
+            },
+            // KLIPY requires searches to originate from the browser, so only joined peers get the app key.
+            gifSearch: gifSearchClientConfig,
             //...
         });
+
+        // Room polls snapshot (also replaces stale client state after a reconnect)
+        await sendToPeer(socket.id, sockets, 'poll', {
+            action: 'list',
+            polls: RoomPolls.list(channel).map((poll) => RoomPolls.toPublic(poll, socket.pollVoterKey)),
+        });
+
+        // Breakout rooms: state to the joined peer, and live room members to the presenters managing them
+        if (breakoutSession) {
+            RoomBreakouts.clearTimer(breakoutSession, 'idle');
+            if (!isBreakoutManager(channel, socket.id)) {
+                await sendToPeer(socket.id, sockets, 'breakout', buildBreakoutState(channel, false));
+            }
+            settleBreakoutHelp(channel, socket.id);
+        }
+        notifyBreakoutManagers(channel);
 
         // SCENARIO: Notify when the first user join room and is awaiting assistance...
         if (peerCounts === 1) {
@@ -1228,13 +2045,30 @@ io.sockets.on('connect', async (socket) => {
                 browser: browserName ? `${browserName} ${browserVersion}` : '',
             }); // .env EMAIL_ALERT=true
         }
+
+        // Handle WebHook
+        if (webhook.enabled) {
+            // Trigger a POST request when a user joins
+            config.timestamp = log.getDateTime(false);
+            axios
+                .post(webhook.url, { event: 'join', data: config }, { timeout: 5000 }) // 5 second timeout
+                .then((response) => log.debug('Join event tracked:', response.data))
+                .catch((error) => log.error('Error tracking join event:', error.message));
+        }
     });
 
     /**
      * Relay ICE to peers
      */
     socket.on('relayICE', async (config) => {
+        if (!Validate.isValidData(config)) return;
         const { peer_id, ice_candidate } = config;
+
+        // Security: sender and target must be joined peers of the same room.
+        if (!isPeerInSameRoom(socket, peer_id)) {
+            log.debug('relayICE blocked: peers do not share a room', { from: socket.id, to: peer_id });
+            return;
+        }
 
         // log.debug('[' + socket.id + '] relay ICE-candidate to [' + peer_id + '] ', {
         //     address: config.ice_candidate,
@@ -1250,7 +2084,14 @@ io.sockets.on('connect', async (socket) => {
      * Relay SDP to peers
      */
     socket.on('relaySDP', async (config) => {
+        if (!Validate.isValidData(config)) return;
         const { peer_id, session_description } = config;
+
+        // Security: sender and target must be joined peers of the same room.
+        if (!isPeerInSameRoom(socket, peer_id) || !session_description || typeof session_description !== 'object') {
+            log.debug('relaySDP blocked: peers do not share a room', { from: socket.id, to: peer_id });
+            return;
+        }
 
         log.debug('[' + socket.id + '] relay SessionDescription to [' + peer_id + '] ', {
             type: session_description.type,
@@ -1268,11 +2109,23 @@ io.sockets.on('connect', async (socket) => {
     socket.on('roomAction', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
-        //log.debug('[' + socket.id + '] Room action:', config);
-        const { room_id, peer_id, peer_name, peer_uuid, password, action } = config;
 
-        // Check if peer is presenter
-        const isPresenter = await isPeerPresenter(room_id, peer_id, peer_name, peer_uuid);
+        if (!Validate.isValidData(config)) {
+            log.warn('Room action invalid data', { peer_id: socket.id, room_id: socket.room_id });
+            return;
+        }
+
+        //log.debug('[' + socket.id + '] Room action:', config);
+        const { room_id, peer_name, peer_uuid, password, action } = config;
+
+        if (!peers[room_id]) {
+            log.warn('Room action room not found', { peer_id: socket.id, room_id });
+            return;
+        }
+
+        // Check if peer is presenter using the server-controlled socket.id
+        // (NOT the client-supplied peer_id) to prevent role spoofing.
+        const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
 
         let room_is_locked = false;
         //
@@ -1297,21 +2150,305 @@ io.sockets.on('connect', async (socket) => {
                         action: action,
                     });
                     break;
-                case 'checkPassword':
+                case 'joinLockOn':
+                    if (!isPresenter) return;
+                    peers[room_id]['joinLock'] = true;
+                    await sendToRoom(room_id, socket.id, 'roomAction', {
+                        peer_name: peer_name,
+                        action: action,
+                    });
+                    break;
+                case 'joinLockOff':
+                    if (!isPresenter) return;
+                    delete peers[room_id]['joinLock'];
+                    await sendToRoom(room_id, socket.id, 'roomAction', {
+                        peer_name: peer_name,
+                        action: action,
+                    });
+                    break;
+                case 'checkPassword': {
+                    // Pre-join check, so the sender is not a room member: throttle guesses per IP + room
+                    const ip = getSocketIP(socket);
+                    const locked = peers[room_id]['lock'] === true;
+                    let result = 'OK';
+                    if (locked) {
+                        if (RoomPassword.isBlocked(ip, room_id)) {
+                            result = 'KO';
+                        } else if (RoomPassword.passwordMatches(password, peers[room_id]['password'])) {
+                            RoomPassword.recordSuccess(ip, room_id);
+                        } else {
+                            RoomPassword.recordFailure(ip, room_id);
+                            result = 'KO';
+                        }
+                    }
                     const data = {
                         peer_name: peer_name,
                         action: action,
-                        password: password == peers[room_id]['password'] ? 'OK' : 'KO',
+                        password: result,
                     };
                     await sendToPeer(socket.id, sockets, 'roomAction', data);
                     break;
+                }
                 default:
                     break;
             }
         } catch (err) {
             log.error('Room action', toJson(err));
         }
-        log.debug('[' + socket.id + '] Room ' + room_id, { locked: room_is_locked, password: password });
+        log.debug('[' + socket.id + '] Room ' + room_id, { locked: room_is_locked });
+    });
+
+    /**
+     * Handle room polls (server-authoritative state)
+     * @param {Object} cfg
+     * @param {string} cfg.room_id - The ID of the room.
+     * @param {string} cfg.action - 'create' | 'vote' | 'close' | 'delete'.
+     * @param {string} [cfg.poll_id] - Target poll (vote, close, delete).
+     * @param {string} [cfg.question] - Poll question (create).
+     * @param {string[]} [cfg.options] - Poll options (create).
+     * @param {boolean} [cfg.anonymous] - Hide voter names (create).
+     * @param {number} [cfg.option] - Option index, -1 to retract the vote (vote).
+     * @param {string} [cfg.peer_name] - Used with peer_uuid for the presenter check (close, delete).
+     * @param {string} [cfg.peer_uuid] - Used with peer_name for the presenter check (close, delete).
+     */
+    socket.on('poll', async (cfg) => {
+        // Poll texts are plain text (rendered with textContent), normalized by RoomPolls instead of checkXSS
+        if (!Validate.isValidData(cfg) || Array.isArray(cfg)) return;
+
+        const { room_id, action, poll_id } = cfg;
+        // Same sanitization as at join time, so the presenter check compares like with like
+        const peer_name = checkXSS(cfg.peer_name);
+        const peer_uuid = checkXSS(cfg.peer_uuid);
+
+        // Security: only a joined peer of the room may read or change its polls.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('poll blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
+
+        // Throttle: every accepted action is broadcast to the whole room
+        const now = Date.now();
+        if (now - (socket.lastPollActionAt || 0) < 100) return;
+        socket.lastPollActionAt = now;
+
+        const voter = {
+            key: socket.pollVoterKey || 's:' + socket.id,
+            name: peers[room_id][socket.id].peer_name,
+        };
+        const replyError = (message) => sendToPeer(socket.id, sockets, 'poll', { action: 'error', message });
+        const canManage = (poll) =>
+            RoomPolls.isCreator(poll, voter.key) || isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
+
+        try {
+            switch (action) {
+                case 'create': {
+                    const { poll, error } = RoomPolls.create(room_id, cfg, voter);
+                    if (error) return await replyError(error);
+                    log.debug('[' + socket.id + '] Poll created', { room_id, poll_id: poll.id });
+                    await broadcastPoll(room_id, poll, { created_by: socket.id });
+                    break;
+                }
+                case 'vote': {
+                    const { poll, error } = RoomPolls.vote(room_id, poll_id, voter, cfg.option);
+                    if (error) return await replyError(error);
+                    await broadcastPoll(room_id, poll);
+                    break;
+                }
+                case 'close': {
+                    const poll = RoomPolls.get(room_id, poll_id);
+                    if (!poll) return await replyError('Poll not found');
+                    if (!canManage(poll)) return;
+                    RoomPolls.close(room_id, poll_id);
+                    await broadcastPoll(room_id, poll, { closed_by: socket.id });
+                    break;
+                }
+                case 'delete': {
+                    const poll = RoomPolls.get(room_id, poll_id);
+                    if (!poll) return await replyError('Poll not found');
+                    if (!canManage(poll)) return;
+                    RoomPolls.remove(room_id, poll_id);
+                    for (const id in channels[room_id]) {
+                        await channels[room_id][id].emit('poll', { action: 'delete', poll_id, deleted_by: socket.id });
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+        } catch (err) {
+            log.error('Poll', toJson(err));
+        }
+    });
+
+    /**
+     * Send a poll update to every peer of the room (sender included), serialized per recipient
+     * so each one only learns its own vote and ownership.
+     * @param {string} room_id
+     * @param {object} poll internal poll
+     * @param {object} [extra] extra fields
+     */
+    async function broadcastPoll(room_id, poll, extra = {}) {
+        for (const id in channels[room_id]) {
+            const peerSocket = channels[room_id][id];
+            await peerSocket.emit('poll', {
+                action: 'update',
+                poll: RoomPolls.toPublic(poll, peerSocket.pollVoterKey),
+                ...extra,
+            });
+        }
+    }
+
+    /**
+     * Handle breakout rooms (server-authoritative state)
+     * @param {Object} cfg
+     * @param {string} cfg.room_id - The room of the sender.
+     * @param {string} cfg.action - 'state' | 'open' | 'move' | 'join' | 'return' | 'broadcast' | 'close'.
+     * @param {string[]} [cfg.rooms] - Breakout room names (open).
+     * @param {number} [cfg.duration] - Minutes, 0 for no limit (open).
+     * @param {boolean} [cfg.allow_return] - Participants may return to the main room by themselves (open).
+     * @param {Object} [cfg.assignments] - { peer_id: room_index } for peers of the main room (open).
+     * @param {string} [cfg.peer_id] - Peer to move (move).
+     * @param {number} [cfg.room_index] - Target room, -1 for the main room (move, join, broadcast: omit for all rooms).
+     * @param {string} [cfg.message] - Plain-text message for one or all the rooms (broadcast).
+     * @param {string} [cfg.peer_name] - Used with peer_uuid for the presenter check.
+     * @param {string} [cfg.peer_uuid] - Used with peer_name for the presenter check.
+     */
+    socket.on('breakout', async (cfg) => {
+        if (!breakoutRoomsEnabled) return;
+
+        // Texts are plain text (rendered with textContent), normalized by RoomBreakouts instead of checkXSS
+        if (!Validate.isValidData(cfg) || Array.isArray(cfg)) return;
+
+        const { room_id, action } = cfg;
+        // Same sanitization as at join time, so the presenter check compares like with like
+        const peer_name = checkXSS(cfg.peer_name);
+        const peer_uuid = checkXSS(cfg.peer_uuid);
+
+        // Security: only a joined peer of the room may read or change its breakout rooms
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('breakout blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
+
+        const now = Date.now();
+        if (now - (socket.lastBreakoutActionAt || 0) < 100) return;
+        socket.lastBreakoutActionAt = now;
+
+        const isManager = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
+        const session = RoomBreakouts.getByRoom(room_id);
+        const replyError = (message) => sendToPeer(socket.id, sockets, 'breakout', { action: 'error', message });
+
+        try {
+            switch (action) {
+                case 'state':
+                    await sendToPeer(socket.id, sockets, 'breakout', buildBreakoutState(room_id, isManager));
+                    break;
+                case 'open': {
+                    if (!isManager) return;
+                    const { session: created, error } = RoomBreakouts.create(room_id, cfg);
+                    if (error) return await replyError(error);
+                    log.info('[' + socket.id + '] Breakout rooms opened', {
+                        room_id,
+                        rooms: created.rooms.length,
+                        duration_ms: created.endsAt ? created.endsAt - created.createdAt : 0,
+                    });
+                    if (created.endsAt) {
+                        RoomBreakouts.setTimer(created, 'end', created.endsAt - Date.now(), () =>
+                            closeBreakoutSession(room_id, 'timeout')
+                        );
+                    }
+                    const assignments =
+                        cfg.assignments && typeof cfg.assignments === 'object' && !Array.isArray(cfg.assignments)
+                            ? Object.entries(cfg.assignments)
+                            : [];
+                    const moved = new Set();
+                    for (const [peerId, index] of assignments) {
+                        const target = RoomBreakouts.getRoomByIndex(created, Number(index));
+                        if (!target || target.index < 0 || !isPeerInRoom(room_id, peerId)) continue;
+                        sendBreakoutMove(channels[room_id][peerId], target, created, room_id, 'host');
+                        moved.add(peerId);
+                    }
+                    // The main room may empty while the peers staying in it reload: let them back in with their role
+                    const main = RoomBreakouts.getRoomByIndex(created, -1);
+                    for (const [peerId, peerSocket] of Object.entries(channels[room_id] || {})) {
+                        if (!moved.has(peerId)) sendBreakoutTicket(peerSocket, main, created, room_id);
+                    }
+                    notifyBreakoutRooms(created, 'opened');
+                    break;
+                }
+                case 'move': {
+                    if (!isManager || !session) return;
+                    const target = RoomBreakouts.getRoomByIndex(session, Number(cfg.room_index));
+                    if (!target) return await replyError('Room not found');
+                    const fromRoom = findBreakoutPeerRoom(session, cfg.peer_id);
+                    if (!fromRoom || fromRoom === target.id) return;
+                    sendBreakoutMove(channels[fromRoom][cfg.peer_id], target, session, fromRoom, 'host');
+                    break;
+                }
+                case 'join': {
+                    if (!isManager || !session) return;
+                    const target = RoomBreakouts.getRoomByIndex(session, Number(cfg.room_index));
+                    if (!target) return await replyError('Room not found');
+                    if (target.id === room_id) return;
+                    sendBreakoutMove(socket, target, session, room_id, 'self');
+                    break;
+                }
+                case 'return': {
+                    if (!session || !RoomBreakouts.isBreakoutRoom(room_id)) return;
+                    if (!session.allowReturn && !isManager) return await replyError('Not allowed');
+                    sendBreakoutMove(socket, RoomBreakouts.getRoomByIndex(session, -1), session, room_id, 'self');
+                    break;
+                }
+                case 'broadcast': {
+                    if (!isManager || !session) return;
+                    const message = RoomBreakouts.cleanMessage(cfg.message);
+                    if (!message) return await replyError('The message is required');
+                    // One room when room_index is given, else every room of the session
+                    const toAll = cfg.room_index === undefined || cfg.room_index === null;
+                    const target = toAll ? null : RoomBreakouts.getRoomByIndex(session, Number(cfg.room_index));
+                    if (!toAll && !target) return await replyError('Room not found');
+                    const from = RoomPolls.cleanName(peers[room_id][socket.id].peer_name);
+                    for (const roomId of target ? [target.id] : RoomBreakouts.roomIds(session)) {
+                        for (const peerSocket of Object.values(channels[roomId] || {})) {
+                            peerSocket.emit('breakout', { action: 'message', message, peer_name: from });
+                        }
+                    }
+                    break;
+                }
+                case 'help': {
+                    if (isManager || !session || !RoomBreakouts.isBreakoutRoom(room_id)) return;
+                    const presenterHere = Object.keys(channels[room_id] || {}).some((peerId) =>
+                        isBreakoutManager(room_id, peerId)
+                    );
+                    if (presenterHere) return await replyError('A presenter is already in this room');
+                    if (countBreakoutManagers(session) === 0) return await replyError('No presenter is available');
+                    const name = RoomPolls.cleanName(peers[room_id][socket.id].peer_name);
+                    const { request, pending, error } = RoomBreakouts.requestHelp(room_id, name);
+                    if (error) return await replyError(error);
+                    if (pending) return;
+                    const room = RoomBreakouts.getRoom(session, room_id);
+                    log.info('[' + socket.id + '] Breakout help requested', { room_id: session.mainRoom });
+                    notifyBreakoutManagers(room_id);
+                    notifyBreakoutRoom(room_id);
+                    sendToBreakoutManagers(session, {
+                        action: 'help',
+                        room_index: room.index,
+                        room_name: room.name,
+                        peer_name: request.peer_name,
+                    });
+                    break;
+                }
+                case 'close':
+                    if (!isManager || !session) return;
+                    log.info('[' + socket.id + '] Breakout rooms closed', { room_id: session.mainRoom });
+                    closeBreakoutSession(session.mainRoom, 'closed');
+                    break;
+                default:
+                    break;
+            }
+        } catch (err) {
+            log.error('Breakout', toJson(err));
+        }
     });
 
     /**
@@ -1320,23 +2457,32 @@ io.sockets.on('connect', async (socket) => {
     socket.on('peerName', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
         // log.debug('Peer name', config);
-        const { room_id, peer_name_old, peer_name_new } = config;
+        const { room_id, peer_name_old, peer_name_new, peer_avatar } = config;
+
+        if (socket.verifiedPeerName) {
+            return log.debug('[' + socket.id + '] peerName change blocked: name is verified (OIDC or HOST_USERS)');
+        }
 
         let peer_id_to_update = null;
 
         for (let peer_id in peers[room_id]) {
-            if (peers[room_id][peer_id]['peer_name'] == peer_name_old && peer_id == socket.id) {
+            if (peer_id == socket.id) {
                 peers[room_id][peer_id]['peer_name'] = peer_name_new;
+                peers[room_id][peer_id]['peer_avatar'] = peer_avatar;
                 // presenter
                 if (presenters && presenters[room_id] && presenters[room_id][peer_id]) {
                     presenters[room_id][peer_id]['peer_name'] = peer_name_new;
                 }
                 peer_id_to_update = peer_id;
-                log.debug('[' + socket.id + '] Peer name changed', {
+                log.debug('[' + socket.id + '] Peer profile changed', {
                     peer_name_old: peer_name_old,
                     peer_name_new: peer_name_new,
                 });
+                break;
             }
         }
 
@@ -1344,6 +2490,7 @@ io.sockets.on('connect', async (socket) => {
             const data = {
                 peer_id: peer_id_to_update,
                 peer_name: peer_name_new,
+                peer_avatar: peer_avatar,
             };
             log.debug('[' + socket.id + '] emit peerName to [room_id: ' + room_id + ']', data);
 
@@ -1356,8 +2503,69 @@ io.sockets.on('connect', async (socket) => {
      */
     socket.on('message', async (message) => {
         const data = checkXSS(message);
+
         log.debug('Got message', data);
+
+        if (!Validate.isValidData(data)) return;
+
+        // Security: only a joined peer of the room may broadcast into it.
+        if (!isPeerInRoom(data.room_id, socket.id)) {
+            log.debug('message blocked: sender is not a joined peer', {
+                room_id: data.room_id,
+                socket_id: socket.id,
+            });
+            return;
+        }
+
+        if (socket.verifiedPeerName && data.peer_name) data.peer_name = socket.verifiedPeerName;
+
         await sendToRoom(data.room_id, socket.id, 'message', data);
+    });
+
+    /**
+     * Relay commands to peers or specific peer in the same room
+     * @param {Object} cfg - The configuration object containing command details.
+     * @param {string} cfg.action - The action to be performed (e.g., 'geoLocation').
+     * @param {boolean} cfg.send_to_all - Whether to send the command to all peers in the room.
+     * @param {Object} cfg.data - The data associated with the command.
+     */
+    socket.on('cmd', async (cfg) => {
+        const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
+        const { action, send_to_all, data } = config;
+
+        const { room_id, peer_name, peer_uuid, to_peer_id } = data;
+
+        log.debug('cmd', config);
+
+        // Security: only a joined peer of the room may relay commands into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('cmd blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
+
+        // Only the presenter can do this actions
+        const presenterActions = ['geoLocation'];
+        if (presenterActions.some((v) => action === v)) {
+            // Authorize using the server-controlled socket.id, not the
+            // client-supplied peer_id, to prevent role spoofing.
+            const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
+            // if not presenter do nothing
+            if (!isPresenter) return;
+        }
+
+        if (send_to_all) {
+            log.debug('[' + socket.id + '] emit cmd to [room_id: ' + room_id + ']', config);
+
+            await sendToRoom(room_id, socket.id, 'cmd', omitPeerUuid(config));
+        } else {
+            if (!isPeerInRoom(room_id, to_peer_id)) return;
+            log.debug('[' + socket.id + '] emit cmd to [' + to_peer_id + '] from room_id [' + room_id + ']');
+
+            await sendToPeer(to_peer_id, sockets, 'cmd', omitPeerUuid(config));
+        }
     });
 
     /**
@@ -1366,14 +2574,24 @@ io.sockets.on('connect', async (socket) => {
     socket.on('peerStatus', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
         // log.debug('Peer status', config);
-        const { room_id, peer_name, peer_id, element, status } = config;
+        const { room_id, peer_name, peer_id, element, status, extras } = config;
+
+        // Security: only a joined peer of the room may broadcast status into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('peerStatus blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
 
         const data = {
             peer_id: peer_id,
             peer_name: peer_name,
             element: element,
             status: status,
+            extras: extras,
         };
 
         try {
@@ -1388,6 +2606,19 @@ io.sockets.on('connect', async (socket) => {
                             break;
                         case 'screen':
                             peers[room_id][peer_id]['peer_screen_status'] = status;
+                            if (extras) peers[room_id][peer_id]['extras'] = extras;
+                            if (!status) {
+                                videoDrawingPermissions[room_id]?.delete(socket.id);
+                                for (const [key, annotation] of videoTextAnnotations[room_id]?.entries() || []) {
+                                    if (annotation.screenOwnerId === socket.id)
+                                        videoTextAnnotations[room_id].delete(key);
+                                }
+                                for (const [key, annotation] of videoDrawingAnnotations[room_id]?.entries() || []) {
+                                    if (annotation.screenOwnerId === socket.id) {
+                                        videoDrawingAnnotations[room_id].delete(key);
+                                    }
+                                }
+                            }
                             break;
                         case 'hand':
                             peers[room_id][peer_id]['peer_hand_status'] = status;
@@ -1418,23 +2649,61 @@ io.sockets.on('connect', async (socket) => {
     socket.on('peerAction', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
         // log.debug('Peer action', config);
-        const { room_id, peer_id, peer_uuid, peer_name, peer_use_video, peer_action, send_to_all } = config;
+        const {
+            room_id,
+            peer_id,
+            peer_uuid,
+            peer_name,
+            peer_avatar,
+            peer_use_video,
+            peer_action,
+            extras,
+            send_to_all,
+        } = config;
+
+        // Security: only a joined peer of the room may relay actions into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('peerAction blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
 
         // Only the presenter can do this actions
-        const presenterActions = ['muteAudio', 'hideVideo', 'ejectAll'];
+        const presenterActions = [
+            'muteAudio',
+            'hideVideo',
+            'noiseSuppressionOn',
+            'noiseSuppressionOff',
+            'ejectAll',
+            'stopScreen',
+            'recStart',
+            'recStop',
+        ];
         if (presenterActions.some((v) => peer_action === v)) {
-            // Check if peer is presenter
-            const isPresenter = await isPeerPresenter(room_id, peer_id, peer_name, peer_uuid);
+            // Authorize using the server-controlled socket.id, not the
+            // client-supplied peer_id, to prevent role spoofing.
+            const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
             // if not presenter do nothing
             if (!isPresenter) return;
+        }
+
+        // Ejected peers cannot use their breakout tickets to get past the room lock
+        if (peer_action === 'ejectAll' && send_to_all) {
+            for (const [id, peerSocket] of Object.entries(channels[room_id] || {})) {
+                if (id !== socket.id) revokeBreakoutTickets(peerSocket);
+            }
         }
 
         const data = {
             peer_id: peer_id,
             peer_name: peer_name,
+            peer_avatar: peer_avatar,
             peer_action: peer_action,
             peer_use_video: peer_use_video,
+            extras: extras,
         };
 
         if (send_to_all) {
@@ -1442,9 +2711,124 @@ io.sockets.on('connect', async (socket) => {
 
             await sendToRoom(room_id, socket.id, 'peerAction', data);
         } else {
+            if (!isPeerInRoom(room_id, peer_id)) return;
             log.debug('[' + socket.id + '] emit peerAction to [' + peer_id + '] from room_id [' + room_id + ']');
 
             await sendToPeer(peer_id, sockets, 'peerAction', data);
+        }
+    });
+
+    /**
+     * Start caption
+     */
+    socket.on('caption', async (cfg) => {
+        // Prevent XSS injection
+        const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
+        const { room_id } = config;
+
+        // Security: only a joined peer of the room may broadcast captions into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('caption blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
+
+        await sendToRoom(room_id, socket.id, 'caption', config);
+    });
+
+    /**
+     * Whisper speech-to-text (OpenAI API or any OpenAI-compatible self-hosted server).
+     *
+     * This is an ASYNC SIDE-CHANNEL and is completely independent from the WebRTC
+     * media path: the browser records a short segment from a SECONDARY copy of the
+     * local microphone, sends it here for transcription, and distributes the
+     * resulting text to peers over the WebRTC DataChannel. Peer audio/video is never
+     * routed through Whisper, so call latency does not depend on Whisper latency.
+     *
+     * The Whisper API key lives only in server config and is NEVER sent to the browser.
+     * https://platform.openai.com/docs/api-reference/audio/createTranscription
+     */
+    socket.on('getWhisperTranscription', async ({ room_id, audio, mimeType, language } = {}, cb) => {
+        if (typeof cb !== 'function') return;
+
+        // Security: only a joined peer of the room may use the transcription proxy.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            return cb({ error: 'Room not found' });
+        }
+
+        if (!configWhisper.enabled) {
+            return cb({ error: 'Whisper transcription is disabled. Please try again later!' });
+        }
+
+        try {
+            // 1. Validate + decode the base64 audio payload and enforce the
+            //    configured max size (defense against oversized uploads).
+            const buffer = whisperLib.decodeAudioPayload(audio, configWhisper.maxAudioBytes);
+
+            // 2. Restrict to a small allow-list of audio MIME types and map to a file extension.
+            const type = typeof mimeType === 'string' && mimeType.startsWith('audio/') ? mimeType : 'audio/webm';
+            const ext = whisperLib.resolveAudioExtension(type);
+
+            // 3. Build the multipart/form-data request expected by the OpenAI-compatible /audio/transcriptions endpoint
+            const FormData = require('form-data');
+            const form = new FormData();
+            form.append('file', buffer, { filename: `segment.${ext}`, contentType: type });
+            form.append('model', configWhisper.model || 'whisper-1');
+            form.append('response_format', 'verbose_json');
+
+            // Per-request language hint wins over the server default; empty = auto-detect.
+            const lang = typeof language === 'string' && language ? language : configWhisper.language;
+            if (lang) form.append('language', lang);
+
+            const headers = { ...form.getHeaders() };
+            // Only attach auth when configured (self-hosted servers may not require it).
+            if (configWhisper.apiKey) headers['Authorization'] = `Bearer ${configWhisper.apiKey}`;
+
+            // basePath comes from trusted server config only; we just append the fixed path.
+            const base = (configWhisper.basePath || 'https://api.openai.com/v1/').replace(/\/?$/, '/');
+            const url = `${base}audio/transcriptions`;
+
+            const response = await axios.post(url, form, {
+                headers,
+                timeout: 30000,
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
+            });
+
+            // Support both the OpenAI shape ({ text }) and plain-string/verbose responses.
+            const raw = response.data && typeof response.data === 'object' ? response.data.text : response.data;
+            const detectedLanguage =
+                (response.data && typeof response.data === 'object' && response.data.language) || lang || '';
+
+            // 4. Filter Whisper hallucinations + low-confidence/no-speech output on
+            //    silent/near-silent audio.
+            const segments = Array.isArray(response.data?.segments) ? response.data.segments : [];
+            const text = whisperLib.filterTranscript(typeof raw === 'string' ? raw : '', segments);
+
+            // Do NOT log raw audio, API keys, or full transcripts. Metadata only.
+            log.debug('Whisper transcription', {
+                room_id,
+                language: detectedLanguage || 'auto',
+                bytes: buffer.length,
+                chars: text.length,
+            });
+
+            cb({ text, language: detectedLanguage });
+        } catch (error) {
+            // Never leak API credentials or upstream URLs to the client.
+            const safeMessage = error?.response?.status
+                ? `Whisper request failed (HTTP ${error.response.status})`
+                : error?.code === 'ECONNABORTED'
+                  ? 'Whisper request timed out'
+                  : error?.message || 'Whisper transcription failed';
+            log.error('Whisper transcription error', {
+                room_id,
+                status: error?.response?.status,
+                message: error?.message,
+            });
+            cb({ error: safeMessage });
         }
     });
 
@@ -1454,17 +2838,26 @@ io.sockets.on('connect', async (socket) => {
     socket.on('kickOut', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
-        const { room_id, peer_id, peer_uuid, peer_name } = config;
 
-        // Check if peer is presenter
-        const isPresenter = await isPeerPresenter(room_id, peer_id, peer_name, peer_uuid);
+        if (!Validate.isValidData(config)) return;
+
+        // peer_id here is the TARGET to kick; the caller's identity is the
+        // server-controlled socket.id, not anything the client supplies.
+        const { room_id, peer_id, peer_uuid, peer_name, peer_kicked_reason } = config;
+
+        // Authorize the caller using socket.id to prevent role spoofing.
+        const isPresenter = isPeerPresenter(room_id, socket.id, peer_name, peer_uuid);
 
         // Only the presenter can kickOut others
-        if (isPresenter) {
+        if (isPresenter && isPeerInRoom(room_id, peer_id)) {
             log.debug('[' + socket.id + '] kick out peer [' + peer_id + '] from room_id [' + room_id + ']');
+
+            // A kicked peer cannot use its breakout ticket to get past the room lock
+            revokeBreakoutTickets(sockets[peer_id]);
 
             await sendToPeer(peer_id, sockets, 'kickOut', {
                 peer_name: peer_name,
+                peer_kicked_reason: peer_kicked_reason,
             });
         }
     });
@@ -1475,8 +2868,17 @@ io.sockets.on('connect', async (socket) => {
     socket.on('fileInfo', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
         // log.debug('File info', config);
-        const { room_id, peer_id, peer_name, broadcast, file } = config;
+        const { room_id, peer_id, peer_name, peer_avatar, broadcast, file } = config;
+
+        // Security: only a joined peer of the room may share file info into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('fileInfo blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
 
         // check if valid fileName
         if (!isValidFileName(file.fileName)) {
@@ -1493,6 +2895,7 @@ io.sockets.on('connect', async (socket) => {
 
         log.debug('[' + socket.id + '] Peer [' + peer_name + '] send file to room_id [' + room_id + ']', {
             peerName: peer_name,
+            peerAvatar: peer_avatar,
             fileName: file.fileName,
             fileSize: bytesToSize(file.fileSize),
             fileType: file.fileType,
@@ -1502,6 +2905,7 @@ io.sockets.on('connect', async (socket) => {
         if (broadcast) {
             await sendToRoom(room_id, socket.id, 'fileInfo', config);
         } else {
+            if (!isPeerInRoom(room_id, peer_id)) return;
             await sendToPeer(peer_id, sockets, 'fileInfo', config);
         }
     });
@@ -1512,10 +2916,36 @@ io.sockets.on('connect', async (socket) => {
     socket.on('fileAbort', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
         const { room_id, peer_name } = config;
+
+        // Security: only a joined peer of the room may broadcast into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('fileAbort blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
 
         log.debug('[' + socket.id + '] Peer [' + peer_name + '] send fileAbort to room_id [' + room_id + ']');
         await sendToRoom(room_id, socket.id, 'fileAbort');
+    });
+
+    socket.on('fileReceiveAbort', async (cfg) => {
+        const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
+        const { room_id, peer_name } = config;
+
+        // Security: only a joined peer of the room may broadcast into it.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('fileReceiveAbort blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
+
+        log.debug('[' + socket.id + '] Peer [' + peer_name + '] send fileReceiveAbort to room_id [' + room_id + ']');
+        await sendToRoom(room_id, socket.id, 'fileReceiveAbort', config);
     });
 
     /**
@@ -1524,8 +2954,17 @@ io.sockets.on('connect', async (socket) => {
     socket.on('videoPlayer', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
         // log.debug('Video player', config);
-        const { room_id, peer_id, peer_name, video_action, video_src } = config;
+        const { room_id, peer_id, peer_name, video_action, video_src, broadcast } = config;
+
+        // Security: only a joined peer of the room may drive the shared video player.
+        if (!isPeerInRoom(room_id, socket.id)) {
+            log.debug('videoPlayer blocked: sender is not a joined peer', { room_id, socket_id: socket.id });
+            return;
+        }
 
         // Check if valid video src url
         if (video_action == 'open' && !isValidHttpURL(video_src)) {
@@ -1538,9 +2977,11 @@ io.sockets.on('connect', async (socket) => {
             peer_name: peer_name,
             video_action: video_action,
             video_src: video_src,
+            broadcast: broadcast,
         };
 
         if (peer_id) {
+            if (!isPeerInRoom(room_id, peer_id)) return;
             log.debug('[' + socket.id + '] emit videoPlayer to [' + peer_id + '] from room_id [' + room_id + ']', data);
 
             await sendToPeer(peer_id, sockets, 'videoPlayer', data);
@@ -1557,17 +2998,535 @@ io.sockets.on('connect', async (socket) => {
     socket.on('wbCanvasToJson', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
+        // Security: cap payload size. A joined peer could otherwise spam
+        // huge canvas JSONs to chew CPU on every other peer's renderer.
+        // 2 MB is far above any realistic whiteboard state (a few hundred
+        // strokes + several base64-encoded images), well below DoS range.
+        if (typeof config.wbCanvasJson === 'string' && config.wbCanvasJson.length > 2_000_000) {
+            log.debug('wbCanvasToJson blocked: payload too large', {
+                size: config.wbCanvasJson.length,
+            });
+            return;
+        }
+
         // log.debug('Whiteboard send canvas', config);
-        const { room_id } = config;
-        await sendToRoom(room_id, socket.id, 'wbCanvasToJson', config);
+        const { room_id, peer_name, peer_uuid } = config;
+
+        // Security: require the sender to be an actual joined peer of the room.
+        // Without this, a socket that never joined could broadcast whiteboard
+        // payloads to all real peers in the room.
+        if (!peers[room_id] || !peers[room_id][socket.id]) {
+            log.debug('wbCanvasToJson blocked: sender is not a joined peer', {
+                room_id,
+                socket_id: socket.id,
+            });
+            return;
+        }
+
+        // Security: when the whiteboard is locked, only the presenter may
+        // overwrite the shared canvas. The lock state is server-authoritative
+        // and does not depend on the client toggling its local wbIsLock flag.
+        if (wbLocks[room_id] && !isPeerPresenter(room_id, socket.id, peer_name, peer_uuid)) {
+            log.debug('wbCanvasToJson blocked: whiteboard is locked and sender is not presenter', {
+                peer_name,
+            });
+            return;
+        }
+
+        // Security: strip fabric image objects whose `src` would force
+        // recipients' browsers to make outbound requests to attacker-chosen
+        // URLs (used as tracking beacons / internal-network probes). Only
+        // https://, http:// to public hosts, and data:image/ are allowed.
+        Validate.sanitizeWbCanvasJson(config, (msg, ctx) => log.debug(msg, ctx));
+
+        await sendToRoom(room_id, socket.id, 'wbCanvasToJson', omitPeerUuid(config));
     });
 
+    /**
+     * Handle whiteboard object updates (upsert/remove) from clients.
+     * Validates the data, checks permissions, and broadcasts to the room.
+     * @param {Object} cfg - The configuration object containing whiteboard object update data.
+     * @param {string} cfg.room_id - The ID of the room.
+     * @param {string} cfg.peer_name - The name of the peer sending the update.
+     * @param {string} cfg.peer_uuid - The UUID of the peer sending the update.
+     * @param {string} cfg.action - The action to perform ('upsert' or 'remove').
+     * @param {string} cfg.object_id - The ID of the whiteboard object.
+     * @param {Object} [cfg.object] - The whiteboard object data (required for 'upsert' action).
+     */
+    socket.on('whiteboardObject', async (cfg) => {
+        const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
+        let rawSize;
+        try {
+            rawSize = JSON.stringify(config).length;
+        } catch (_) {
+            return;
+        }
+        if (rawSize > 2_000_000) return;
+
+        const { room_id, peer_name, peer_uuid, action, object_id } = config;
+        if (!peers[room_id] || !peers[room_id][socket.id]) return;
+        if (wbLocks[room_id] && !isPeerPresenter(room_id, socket.id, peer_name, peer_uuid)) return;
+        if (!['upsert', 'remove'].includes(action)) return;
+        if (typeof object_id !== 'string' || object_id.length > 200) return;
+
+        if (action === 'upsert') {
+            if (!config.object || typeof config.object !== 'object') return;
+            const canvas = { wbCanvasJson: { objects: [config.object] } };
+            Validate.sanitizeWbCanvasJson(canvas, (msg, ctx) => log.debug(msg, ctx));
+            if (canvas.wbCanvasJson.objects.length !== 1) return;
+            config.object = canvas.wbCanvasJson.objects[0];
+            config.object.wbId = object_id;
+            config.object.wbAuthor = String(peers[room_id][socket.id].peer_name || 'Participant').slice(0, 40);
+            config.object.wbAuthorId = socket.id;
+        } else {
+            delete config.object;
+        }
+
+        await sendToRoom(room_id, socket.id, 'whiteboardObject', omitPeerUuid(config));
+    });
+
+    /**
+     * Handle whiteboard pointer updates from clients.
+     * Validates the data, checks permissions, and broadcasts to the room.
+     * @param {Object} cfg - The configuration object containing pointer data.
+     * @param {string} cfg.room_id - The ID of the room.
+     * @param {number} cfg.x - The x-coordinate of the pointer.
+     * @param {number} cfg.y - The y-coordinate of the pointer.
+     * @param {boolean} cfg.active - Whether the pointer is active.
+     */
+    socket.on('whiteboardPointer', async (cfg) => {
+        if (!cfg || typeof cfg !== 'object') return;
+
+        const room_id = cfg.room_id;
+        if (!wbParticipantNames[room_id] || !peers[room_id] || !peers[room_id][socket.id]) return;
+
+        const now = Date.now();
+        if (cfg.active && now - (socket.lastWhiteboardPointerAt || 0) < 25) return;
+        socket.lastWhiteboardPointerAt = now;
+
+        const x = Number(cfg.x);
+        const y = Number(cfg.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000) return;
+        const peer = peers[room_id][socket.id];
+        if (wbLocks[room_id] && !isPeerPresenter(room_id, socket.id, peer.peer_name, peer.peer_uuid)) return;
+
+        await sendToRoom(room_id, socket.id, 'whiteboardPointer', {
+            peer_id: socket.id,
+            peer_name: String(peers[room_id][socket.id].peer_name || 'Participant').slice(0, 40),
+            x,
+            y,
+            active: Boolean(cfg.active),
+        });
+    });
+
+    /**
+     * Handle whiteboard actions from clients.
+     * Validates the data, checks permissions, and broadcasts to the room.
+     * @param {Object} cfg - The configuration object containing action data.
+     * @param {string} cfg.room_id - The ID of the room.
+     * @param {string} cfg.peer_name - The name of the peer.
+     * @param {string} cfg.peer_uuid - The UUID of the peer.
+     * @param {string} cfg.action - The action to perform (e.g., lock, unlock).
+     */
     socket.on('whiteboardAction', async (cfg) => {
         // Prevent XSS injection
         const config = checkXSS(cfg);
+
+        if (!Validate.isValidData(config)) return;
+
+        const { room_id, peer_name, peer_uuid, action } = config;
+
+        // Security: require the sender to be an actual joined peer of the room
+        // (see wbCanvasToJson above for rationale).
+        if (!peers[room_id] || !peers[room_id][socket.id]) {
+            log.debug('whiteboardAction blocked: sender is not a joined peer', {
+                room_id,
+                socket_id: socket.id,
+            });
+            return;
+        }
+
+        // Security: whiteboardAction mutates global whiteboard state
+        // (clear / undo / redo / bgcolor / lock / unlock / open / close) for
+        // every other peer. Only the presenter is allowed to trigger these.
+        // Verify against server-known peer identity, not client-supplied
+        // peer_name / peer_uuid (which are attacker-controlled in the request
+        // body).
+        if (!isPeerPresenter(room_id, socket.id, peer_name, peer_uuid)) {
+            log.debug('whiteboardAction blocked: sender is not presenter', {
+                action,
+                peer_name,
+            });
+            return;
+        }
+
+        // Overwrite the broadcast peer_name with the server-known value so a
+        // presenter can't be tricked into proxying an HTML payload supplied
+        // in the request body (the client renders peer_name inside a
+        // SweetAlert toast).
+        const stored = peers[room_id][socket.id];
+        if (stored && stored.peer_name) {
+            config.peer_name = stored.peer_name;
+        }
+
+        // Track lock state server-side so late-joining peers / future
+        // requests are gated even if the presenter never re-toggles the
+        // button.
+        if (action === 'lock') wbLocks[room_id] = true;
+        if (action === 'unlock') delete wbLocks[room_id];
+        if (action === 'participantNames') {
+            config.status = Boolean(config.status);
+            wbParticipantNames[room_id] = config.status;
+        }
+
         log.debug('Whiteboard', config);
-        const { room_id } = config;
-        await sendToRoom(room_id, socket.id, 'whiteboardAction', config);
+        await sendToRoom(room_id, socket.id, 'whiteboardAction', omitPeerUuid(config));
+    });
+
+    /**
+     * Handle video drawing updates from clients.
+     * Validates the data, checks permissions, and broadcasts to the room.
+     * @param {Object} cfg - The configuration object containing video drawing data.
+     * @param {string} cfg.room_id - The ID of the room.
+     * @param {string} cfg.screenOwnerId - The ID of the screen owner.
+     * @param {'pen'|'text'|'annotation'} cfg.type - The annotation type.
+     * @param {'create'|'restore'|'draft'|'move'|'delete'|'clear'} [cfg.action] - The annotation action.
+     * @param {string} [cfg.annotationId] - The text annotation identifier.
+     * @param {Array} [cfg.points] - The array of points representing a pen stroke.
+     * @param {string} [cfg.text] - The text annotation content.
+     * @param {boolean} cfg.end - Whether this is the end of the drawing.
+     */
+    socket.on('videoDrawing', async (cfg) => {
+        const config = checkXSS(cfg);
+        if (!Validate.isValidData(config)) return;
+
+        const {
+            room_id,
+            screenOwnerId,
+            type,
+            action,
+            annotationId,
+            drawerId,
+            points,
+            text,
+            x,
+            y,
+            end,
+            tool,
+            color,
+            width,
+            fontSize,
+            bold,
+            italic,
+            boxWidth,
+            underline,
+            strikethrough,
+            textAlign,
+            backgroundColor,
+            rotation,
+        } = config;
+        if (!isPeerInRoom(room_id, socket.id) || !peers[room_id]?.[screenOwnerId]) return;
+
+        if (type === 'permissions') {
+            if (
+                socket.id !== screenOwnerId ||
+                !peers[room_id][screenOwnerId].peer_screen_status ||
+                typeof config.allowed !== 'boolean'
+            ) {
+                return;
+            }
+            const permissions = (videoDrawingPermissions[room_id] ||= new Map());
+            if (config.allowed) permissions.delete(screenOwnerId);
+            else permissions.set(screenOwnerId, false);
+            const data = { type, screenOwnerId, allowed: config.allowed };
+            socket.emit('videoDrawing', data);
+            await sendToRoom(room_id, socket.id, 'videoDrawing', data);
+            return;
+        }
+        if (socket.id !== screenOwnerId && videoDrawingPermissions[room_id]?.get(screenOwnerId) === false) return;
+
+        if (type === 'annotation') {
+            const roomAnnotations = (videoDrawingAnnotations[room_id] ||= new Map());
+            if (action === 'clear') {
+                const clearAll = socket.id === screenOwnerId;
+                for (const [key, annotation] of roomAnnotations) {
+                    if (annotation.screenOwnerId === screenOwnerId && (clearAll || annotation.drawerId === socket.id)) {
+                        roomAnnotations.delete(key);
+                    }
+                }
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type,
+                    action,
+                    screenOwnerId,
+                    drawerId: socket.id,
+                    clearAll,
+                });
+                return;
+            }
+
+            const validId = typeof annotationId === 'string' && annotationId.length > 0 && annotationId.length <= 100;
+            const validPoints =
+                Array.isArray(points) &&
+                points.length >= 2 &&
+                points.length <= 2048 &&
+                points.every(
+                    (point) =>
+                        point &&
+                        Number.isFinite(point.x) &&
+                        Number.isFinite(point.y) &&
+                        point.x >= 0 &&
+                        point.x <= 1 &&
+                        point.y >= 0 &&
+                        point.y <= 1
+                );
+            const annotationKey = `${screenOwnerId}:${annotationId}`;
+            const annotation = roomAnnotations.get(annotationKey);
+            if (action === 'move') {
+                if (
+                    !validId ||
+                    !validPoints ||
+                    !annotation ||
+                    (socket.id !== annotation.drawerId && socket.id !== screenOwnerId)
+                ) {
+                    return;
+                }
+                annotation.points = points;
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type,
+                    action,
+                    screenOwnerId,
+                    annotationId,
+                    points,
+                });
+                return;
+            }
+            if (action === 'delete') {
+                if (!validId || !annotation || (socket.id !== annotation.drawerId && socket.id !== screenOwnerId)) {
+                    return;
+                }
+                roomAnnotations.delete(annotationKey);
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type,
+                    action,
+                    screenOwnerId,
+                    annotationId,
+                });
+                return;
+            }
+
+            const validTool = ['pencil', 'highlighter', 'circle', 'rectangle', 'diamond', 'arrow'].includes(tool);
+            const validColor = typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color);
+            const validWidth = Number.isFinite(width) && width >= 0.001 && width <= 0.05;
+            const restoring = action === 'restore';
+            const validDrawerId = typeof drawerId === 'string' && drawerId.length > 0 && drawerId.length <= 100;
+            if (
+                (action !== 'create' && !restoring) ||
+                (restoring && (socket.id !== screenOwnerId || !validDrawerId)) ||
+                !validId ||
+                !validTool ||
+                !validColor ||
+                !validWidth ||
+                !validPoints ||
+                roomAnnotations.has(annotationKey) ||
+                roomAnnotations.size >= 500
+            ) {
+                return;
+            }
+
+            const newAnnotation = {
+                annotationId,
+                drawerId: restoring ? drawerId : socket.id,
+                screenOwnerId,
+                tool,
+                color,
+                width,
+                points,
+            };
+            roomAnnotations.set(annotationKey, newAnnotation);
+            await sendToRoom(room_id, socket.id, 'videoDrawing', { type, action: 'create', ...newAnnotation });
+            return;
+        }
+
+        if (type === 'text') {
+            if (typeof annotationId !== 'string' || annotationId.length === 0 || annotationId.length > 100) {
+                if (action !== 'clear') return;
+            }
+            const roomAnnotations = (videoTextAnnotations[room_id] ||= new Map());
+            const annotationKey = `${screenOwnerId}:${annotationId}`;
+            const validPosition = Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1;
+            const getTextStyle = (fallback = {}) => {
+                const style = {
+                    color: color ?? fallback.color ?? '#ffffff',
+                    fontSize: fontSize ?? fallback.fontSize ?? 16,
+                    bold: bold ?? fallback.bold ?? false,
+                    italic: italic ?? fallback.italic ?? false,
+                    boxWidth: boxWidth ?? fallback.boxWidth ?? 0.35,
+                    underline: underline ?? fallback.underline ?? false,
+                    strikethrough: strikethrough ?? fallback.strikethrough ?? false,
+                    textAlign: textAlign ?? fallback.textAlign ?? 'left',
+                    backgroundColor: backgroundColor ?? fallback.backgroundColor ?? 'transparent',
+                    rotation: rotation ?? fallback.rotation ?? 0,
+                };
+                return typeof style.color === 'string' &&
+                    /^#[0-9a-f]{6}$/i.test(style.color) &&
+                    [12, 16, 20, 24, 32].includes(style.fontSize) &&
+                    typeof style.bold === 'boolean' &&
+                    typeof style.italic === 'boolean' &&
+                    Number.isFinite(style.boxWidth) &&
+                    style.boxWidth >= 0.15 &&
+                    style.boxWidth <= 0.8 &&
+                    typeof style.underline === 'boolean' &&
+                    typeof style.strikethrough === 'boolean' &&
+                    ['left', 'center', 'right'].includes(style.textAlign) &&
+                    (style.backgroundColor === 'transparent' || /^#[0-9a-f]{6}$/i.test(style.backgroundColor)) &&
+                    [-45, -30, -15, 0, 15, 30, 45].includes(style.rotation)
+                    ? style
+                    : null;
+            };
+
+            if (action === 'draft') {
+                // Live typing preview: relayed only, never stored
+                const textStyle = getTextStyle();
+                if (typeof text !== 'string' || text.length > 1000 || !textStyle || !validPosition) return;
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type: 'text',
+                    action,
+                    screenOwnerId,
+                    drawerId: socket.id,
+                    annotationId,
+                    text,
+                    x,
+                    y,
+                    ...textStyle,
+                });
+                return;
+            }
+
+            if (action === 'create' || action === 'restore') {
+                const restoring = action === 'restore';
+                const validDrawerId = typeof drawerId === 'string' && drawerId.length > 0 && drawerId.length <= 100;
+                const textStyle = getTextStyle();
+                if (
+                    (restoring && (socket.id !== screenOwnerId || !validDrawerId)) ||
+                    typeof text !== 'string' ||
+                    text.length === 0 ||
+                    text.length > 1000 ||
+                    !textStyle ||
+                    !validPosition ||
+                    roomAnnotations.has(annotationKey) ||
+                    roomAnnotations.size >= 200
+                ) {
+                    return;
+                }
+                const annotation = {
+                    annotationId,
+                    drawerId: restoring ? drawerId : socket.id,
+                    screenOwnerId,
+                    text,
+                    x,
+                    y,
+                    ...textStyle,
+                };
+                roomAnnotations.set(annotationKey, annotation);
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type: 'text',
+                    action: 'create',
+                    ...annotation,
+                });
+                return;
+            }
+
+            if (action === 'clear') {
+                if (socket.id !== screenOwnerId) return;
+                for (const [key, annotation] of roomAnnotations) {
+                    if (annotation.screenOwnerId === screenOwnerId) roomAnnotations.delete(key);
+                }
+                await sendToRoom(room_id, socket.id, 'videoDrawing', { type: 'text', action, screenOwnerId });
+                return;
+            }
+
+            const annotation = roomAnnotations.get(annotationKey);
+            if (!annotation || (socket.id !== annotation.drawerId && socket.id !== screenOwnerId)) return;
+            if (action === 'update') {
+                const textStyle = getTextStyle(annotation);
+                if (typeof text !== 'string' || text.length === 0 || text.length > 1000 || !textStyle) return;
+                Object.assign(annotation, { text, ...textStyle });
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type: 'text',
+                    action,
+                    screenOwnerId,
+                    drawerId: socket.id,
+                    annotationId,
+                    text,
+                    ...textStyle,
+                });
+                return;
+            }
+            if (action === 'move') {
+                if (!validPosition) return;
+                annotation.x = x;
+                annotation.y = y;
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type: 'text',
+                    action,
+                    screenOwnerId,
+                    annotationId,
+                    x,
+                    y,
+                });
+                return;
+            }
+            if (action === 'delete') {
+                roomAnnotations.delete(annotationKey);
+                await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                    type: 'text',
+                    action,
+                    screenOwnerId,
+                    annotationId,
+                });
+            }
+            return;
+        }
+
+        if (!Array.isArray(points) || points.length === 0 || points.length > 128) return;
+
+        const validPoints = points.every(
+            (point) =>
+                point &&
+                Number.isFinite(point.x) &&
+                Number.isFinite(point.y) &&
+                point.x >= 0 &&
+                point.x <= 1 &&
+                point.y >= 0 &&
+                point.y <= 1
+        );
+        if (!validPoints) return;
+
+        if (type === 'laser') {
+            if (points.length !== 1) return;
+            await sendToRoom(room_id, socket.id, 'videoDrawing', {
+                type: 'laser',
+                drawerId: socket.id,
+                screenOwnerId,
+                points,
+                end: Boolean(end),
+            });
+            return;
+        }
+
+        await sendToRoom(room_id, socket.id, 'videoDrawing', {
+            type: 'pen',
+            drawerId: socket.id,
+            screenOwnerId,
+            points,
+            end: Boolean(end),
+        });
     });
 
     /**
@@ -1592,34 +3551,87 @@ io.sockets.on('connect', async (socket) => {
             });
             log.debug('[' + socket.id + '] emit addPeer [' + id + ']');
         }
+        for (const [screenOwnerId, allowed] of videoDrawingPermissions[channel] || []) {
+            socket.emit('videoDrawing', { type: 'permissions', screenOwnerId, allowed });
+        }
+        for (const annotation of videoTextAnnotations[channel]?.values() || []) {
+            socket.emit('videoDrawing', { type: 'text', action: 'create', ...annotation });
+        }
+        for (const annotation of videoDrawingAnnotations[channel]?.values() || []) {
+            socket.emit('videoDrawing', { type: 'annotation', action: 'create', ...annotation });
+        }
     }
 
     /**
      * Remove peers from channel
      * @param {string} channel room id
      */
-    async function removePeerFrom(channel) {
+    async function removePeerFrom(channel, socket, reason = 'unknown') {
         if (!(channel in socket.channels)) {
             return log.debug('[' + socket.id + '] [Warning] not in ', channel);
         }
         try {
+            // Handle WebHook
+            if (webhook.enabled) {
+                const data = {
+                    timestamp: log.getDateTime(false),
+                    room_id: channel,
+                    peer: socket.channels[channel],
+                    reason: reason,
+                };
+                // Trigger a POST request when a user disconnects
+                axios
+                    .post(webhook.url, { event: 'disconnect', data }, { timeout: 5000 }) // 5 second timeout
+                    .then((response) => log.debug('Disconnect event tracked:', response.data))
+                    .catch((error) => log.error('Error tracking disconnect event:', error.message));
+            }
+
+            videoDrawingPermissions[channel]?.delete(socket.id);
+            const roomAnnotations = videoTextAnnotations[channel];
+            if (roomAnnotations) {
+                for (const [key, annotation] of roomAnnotations) {
+                    if (annotation.screenOwnerId === socket.id) {
+                        roomAnnotations.delete(key);
+                    } else if (annotation.drawerId === socket.id) {
+                        roomAnnotations.delete(key);
+                        await sendToRoom(channel, socket.id, 'videoDrawing', {
+                            type: 'text',
+                            action: 'delete',
+                            screenOwnerId: annotation.screenOwnerId,
+                            annotationId: annotation.annotationId,
+                        });
+                    }
+                }
+            }
+            const roomDrawingAnnotations = videoDrawingAnnotations[channel];
+            if (roomDrawingAnnotations) {
+                for (const [key, annotation] of roomDrawingAnnotations) {
+                    if (annotation.screenOwnerId === socket.id) {
+                        roomDrawingAnnotations.delete(key);
+                    }
+                }
+            }
+
             delete socket.channels[channel];
             delete channels[channel][socket.id];
             delete peers[channel][socket.id]; // delete peer data from the room
 
-            switch (Object.keys(peers[channel]).length) {
-                case 0: // last peer disconnected from the room without room lock & password set
-                    delete peers[channel];
-                    delete presenters[channel];
-                    break;
-                case 2: // last peer disconnected from the room having room lock & password set
-                    if (peers[channel]['lock'] && peers[channel]['password']) {
-                        delete peers[channel]; // clean lock and password value from the room
-                        delete presenters[channel]; // clean the presenter from the channel
-                    }
-                    break;
-                default:
-                    break;
+            if (getPeerCount(channel) === 0) {
+                // A main room emptied by its breakout rooms keeps its state for the returning peers
+                const keepMainRoomState = !!RoomBreakouts.get(channel);
+                if (keepMainRoomState) RoomBreakouts.saveMainState(channel, getRoomMeta(peers[channel]));
+                delete peers[channel];
+                delete presenters[channel];
+                delete channels[channel]; // Clean up channels to prevent memory leak
+                delete wbLocks[channel]; // Clean up whiteboard lock state
+                delete wbParticipantNames[channel]; // Clean up whiteboard participant attribution state
+                delete videoTextAnnotations[channel]; // Clean up persistent screen annotation state
+                delete videoDrawingAnnotations[channel]; // Clean up persistent screen drawing state
+                delete videoDrawingPermissions[channel];
+                if (!keepMainRoomState) {
+                    RoomTimeLimit.clear(channel);
+                    RoomPolls.clear(channel); // Clean up room polls
+                }
             }
         } catch (err) {
             log.error('Remove Peer', toJson(err));
@@ -1627,16 +3639,25 @@ io.sockets.on('connect', async (socket) => {
 
         const activeRooms = getActiveRooms();
 
-        log.info('[removePeerFrom] - active rooms and peers count', activeRooms);
+        log.debug('[removePeerFrom] - active rooms and peers count', activeRooms);
 
-        log.info('[removePeerFrom] - connected presenters grp by roomId', presenters);
+        log.debug('[removePeerFrom] - connected presenters grp by roomId', presenters);
 
-        log.info('[removePeerFrom] - connected peers grp by roomId', peers);
+        log.debug('[removePeerFrom] - connected peers grp by roomId', peers);
 
         for (let id in channels[channel]) {
             await channels[channel][id].emit('removePeer', { peer_id: socket.id });
             socket.emit('removePeer', { peer_id: id });
             log.debug('[' + socket.id + '] emit removePeer [' + id + ']');
+        }
+
+        settleBreakoutHelp(channel);
+        notifyBreakoutManagers(channel);
+        scheduleBreakoutIdleCheck(channel);
+
+        if (!OIDC.enabled && hostCfg.protected) {
+            hostCfg.authenticated = false;
+            removeIP(socket);
         }
     }
 
@@ -1682,14 +3703,308 @@ io.sockets.on('connect', async (socket) => {
 }); // end [sockets.on-connect]
 
 /**
- * Get Env as boolean
- * @param {string} key
- * @param {boolean} force_true_if_undefined
- * @returns boolean
+ * Room time limit reached: notify all the peers in the room (and in its breakout rooms)
+ * @param {string} room_id
  */
-function getEnvBoolean(key, force_true_if_undefined = false) {
-    if (key == undefined && force_true_if_undefined) return true;
-    return key == 'true' ? true : false;
+function endRoomTimeLimit(room_id) {
+    const roomSockets = getRoomFamily(room_id).flatMap((roomId) => Object.values(channels[roomId] || {}));
+    log.info('Room time limit reached', { room_id, peers: roomSockets.length });
+    for (const roomSocket of roomSockets) {
+        roomSocket.emit('roomTimeLimit', { action: 'end' });
+    }
+}
+
+/**
+ * Room time limit grace period over: disconnect the peers still in the room (and in its breakout rooms)
+ * @param {string} room_id
+ */
+function disconnectRoomPeers(room_id) {
+    for (const roomId of getRoomFamily(room_id)) {
+        for (const roomSocket of Object.values(channels[roomId] || {})) {
+            roomSocket.disconnect(true);
+        }
+    }
+}
+
+/**
+ * @param {string} room_id
+ * @returns {string[]} the room plus its breakout rooms when it is the main room of an open session
+ */
+function getRoomFamily(room_id) {
+    const session = RoomBreakouts.get(room_id);
+    return session ? RoomBreakouts.roomIds(session) : [room_id];
+}
+
+/**
+ * Room state kept by the server alongside the peers (lock, password, join lock)
+ * @param {object} room peers[room_id]
+ * @returns {object}
+ */
+function getRoomMeta(room) {
+    const meta = {};
+    for (const key of roomMetaKeys) {
+        if (room && Object.hasOwn(room, key)) meta[key] = room[key];
+    }
+    return meta;
+}
+
+/**
+ * @param {string} room_id
+ * @returns {object[]} joined peers { peer_id, peer_name, presenter }, names as plain text
+ */
+function getBreakoutRoomMembers(room_id) {
+    return Object.entries(peers[room_id] || {})
+        .filter(([peer_id]) => !roomMetaKeys.has(peer_id))
+        .map(([peer_id, peer]) => ({
+            peer_id,
+            peer_name: RoomPolls.cleanName(peer.peer_name),
+            presenter: isBreakoutManager(room_id, peer_id),
+        }));
+}
+
+/**
+ * Presenter of the room: can manage the breakout rooms of its session
+ * @param {string} room_id
+ * @param {string} peer_id
+ * @returns {boolean}
+ */
+function isBreakoutManager(room_id, peer_id) {
+    return presenters[room_id]?.[peer_id]?.is_presenter === true;
+}
+
+/**
+ * Breakout state for one peer. Room ids are never exposed, managers address rooms by index.
+ * @param {string} room_id room of the recipient
+ * @param {boolean} isManager recipient is a presenter of the room
+ * @returns {object}
+ */
+function buildBreakoutState(room_id, isManager) {
+    const session = RoomBreakouts.getByRoom(room_id);
+    const state = { action: 'state', active: !!session, is_manager: isManager === true, now: Date.now() };
+    if (!session) {
+        if (isManager) state.main_members = getBreakoutRoomMembers(room_id);
+        return state;
+    }
+    const room = RoomBreakouts.getRoom(session, room_id);
+    Object.assign(state, {
+        is_main: room.index < 0,
+        room: room.index < 0 ? null : { index: room.index, name: room.name },
+        ends_at: session.endsAt,
+        allow_return: session.allowReturn,
+        help_requested: room.index >= 0 && !!RoomBreakouts.getHelp(room_id),
+    });
+    if (isManager) {
+        state.main_members = getBreakoutRoomMembers(session.mainRoom);
+        state.rooms = session.rooms.map((breakoutRoom) => {
+            const help = RoomBreakouts.getHelp(breakoutRoom.id);
+            return {
+                index: breakoutRoom.index,
+                name: breakoutRoom.name,
+                members: getBreakoutRoomMembers(breakoutRoom.id),
+                help: help ? { peer_name: help.peer_name } : null,
+            };
+        });
+    }
+    return state;
+}
+
+/**
+ * Push the live breakout state to the presenters of the room and of its session rooms
+ * @param {string} room_id
+ */
+function notifyBreakoutManagers(room_id) {
+    if (!breakoutRoomsEnabled) return;
+    const session = RoomBreakouts.getByRoom(room_id);
+    const roomIds = session ? RoomBreakouts.roomIds(session) : [room_id];
+    for (const roomId of roomIds) {
+        for (const [peer_id, peerSocket] of Object.entries(channels[roomId] || {})) {
+            if (isBreakoutManager(roomId, peer_id)) peerSocket.emit('breakout', buildBreakoutState(roomId, true));
+        }
+    }
+}
+
+/**
+ * Push the breakout state to every peer of the session rooms
+ * @param {object} session
+ * @param {string} [reason] 'opened'
+ */
+function notifyBreakoutRooms(session, reason) {
+    for (const roomId of RoomBreakouts.roomIds(session)) {
+        for (const [peer_id, peerSocket] of Object.entries(channels[roomId] || {})) {
+            peerSocket.emit('breakout', { ...buildBreakoutState(roomId, isBreakoutManager(roomId, peer_id)), reason });
+        }
+    }
+}
+
+/**
+ * Push the breakout state to every peer of one room
+ * @param {string} room_id
+ */
+function notifyBreakoutRoom(room_id) {
+    for (const [peer_id, peerSocket] of Object.entries(channels[room_id] || {})) {
+        peerSocket.emit('breakout', buildBreakoutState(room_id, isBreakoutManager(room_id, peer_id)));
+    }
+}
+
+/**
+ * Send a message to the presenters of every room of the session
+ * @param {object} session
+ * @param {object} data
+ */
+function sendToBreakoutManagers(session, data) {
+    for (const roomId of RoomBreakouts.roomIds(session)) {
+        for (const [peer_id, peerSocket] of Object.entries(channels[roomId] || {})) {
+            if (isBreakoutManager(roomId, peer_id)) peerSocket.emit('breakout', data);
+        }
+    }
+}
+
+/**
+ * @param {object} session
+ * @returns {number} presenters joined to any room of the session
+ */
+function countBreakoutManagers(session) {
+    return RoomBreakouts.roomIds(session).reduce(
+        (count, roomId) =>
+            count + Object.keys(channels[roomId] || {}).filter((peer_id) => isBreakoutManager(roomId, peer_id)).length,
+        0
+    );
+}
+
+/**
+ * A presenter came into the room, or the room emptied: its help request is over
+ * @param {string} room_id
+ * @param {string} [peer_id] peer that joined the room
+ */
+function settleBreakoutHelp(room_id, peer_id) {
+    if (!RoomBreakouts.getHelp(room_id)) return;
+    const settled = peer_id ? isBreakoutManager(room_id, peer_id) : getPeerCount(room_id) === 0;
+    if (settled && RoomBreakouts.clearHelp(room_id)) notifyBreakoutRoom(room_id);
+}
+
+/**
+ * @param {object} session
+ * @param {string} peer_id
+ * @returns {string|undefined} session room the peer is joined to
+ */
+function findBreakoutPeerRoom(session, peer_id) {
+    return RoomBreakouts.roomIds(session).find((roomId) => isPeerInRoom(roomId, peer_id));
+}
+
+/**
+ * Order a peer to move to another room of the session: the client reloads on the target
+ * room and joins it with the ticket, keeping its presenter role.
+ * @param {object} peerSocket
+ * @param {object} target { index, id, name }
+ * @param {object} session
+ * @param {string} fromRoom room the peer is leaving
+ * @param {string} reason 'host' | 'self' | 'closed' | 'timeout' | 'idle'
+ */
+function sendBreakoutMove(peerSocket, target, session, fromRoom, reason) {
+    if (!peerSocket || !target) return;
+    const token = issueBreakoutTicket(peerSocket, target, session, fromRoom);
+    peerSocket.emit('breakout', {
+        action: 'move',
+        room_id: target.id,
+        room_name: target.name,
+        is_main: target.index < 0,
+        reason,
+        token,
+    });
+}
+
+/**
+ * Give a peer the ticket for the room it is in, without moving it (rejoin after a reload)
+ * @param {object} peerSocket
+ * @param {object} target { index, id, name }
+ * @param {object} session
+ * @param {string} room room the peer is in
+ */
+function sendBreakoutTicket(peerSocket, target, session, room) {
+    if (!peerSocket || !target) return;
+    const token = issueBreakoutTicket(peerSocket, target, session, room);
+    peerSocket.emit('breakout', { action: 'ticket', room_id: target.id, token });
+}
+
+/**
+ * Issue a ticket to a room of the session, replacing the tickets previously issued to the peer
+ * @param {object} peerSocket
+ * @param {object} target { index, id, name }
+ * @param {object} session
+ * @param {string} fromRoom room the peer is in (its presenter role there is kept)
+ * @returns {string} token
+ */
+function issueBreakoutTicket(peerSocket, target, session, fromRoom) {
+    const { token, jti } = createBreakoutToken({
+        room: target.id,
+        main: session.mainRoom,
+        sid: session.id,
+        uuid: peerSocket.peerUuid,
+        presenter: isBreakoutManager(fromRoom, peerSocket.id),
+    });
+    revokeBreakoutTickets(peerSocket);
+    RoomBreakouts.addTicket(session, jti);
+    peerSocket.breakoutTicketIds = new Set([jti]);
+    return token;
+}
+
+/**
+ * Stop honoring the breakout tickets of a peer
+ * @param {object} peerSocket
+ */
+function revokeBreakoutTickets(peerSocket) {
+    if (!peerSocket?.breakoutTicketIds?.size) return;
+    RoomBreakouts.revokeTickets(peerSocket.breakoutTicketIds);
+    peerSocket.breakoutTicketIds.clear();
+}
+
+/**
+ * Close a breakout session: everyone in a breakout room goes back to the main room
+ * @param {string} mainRoom
+ * @param {string} reason 'closed' | 'timeout' | 'idle'
+ * @returns {boolean} closed
+ */
+function closeBreakoutSession(mainRoom, reason) {
+    const session = RoomBreakouts.get(mainRoom);
+    if (!session) return false;
+    // Issued before ending the session, so the return tickets stay honored for the return window
+    const main = RoomBreakouts.getRoomByIndex(session, -1);
+    for (const room of session.rooms) {
+        for (const peerSocket of Object.values(channels[room.id] || {})) {
+            sendBreakoutMove(peerSocket, main, session, room.id, reason);
+        }
+    }
+    RoomBreakouts.end(mainRoom);
+    for (const [peer_id, peerSocket] of Object.entries(channels[mainRoom] || {})) {
+        peerSocket.emit('breakout', { ...buildBreakoutState(mainRoom, isBreakoutManager(mainRoom, peer_id)), reason });
+    }
+    // Main room still empty after the return window: drop the state it kept for the returning peers
+    if (!(mainRoom in peers)) {
+        setTimeout(() => {
+            if (mainRoom in peers || RoomBreakouts.get(mainRoom)) return;
+            RoomBreakouts.dropOrphanState(mainRoom);
+            RoomTimeLimit.clear(mainRoom);
+            RoomPolls.clear(mainRoom);
+        }, BREAKOUT_RETURN_WINDOW_MS).unref?.();
+    }
+    log.debug('Breakout session closed', { mainRoom, reason });
+    return true;
+}
+
+/**
+ * Close a session whose rooms all stayed empty (peers left instead of moving)
+ * @param {string} room_id
+ */
+function scheduleBreakoutIdleCheck(room_id) {
+    const session = RoomBreakouts.getByRoom(room_id);
+    if (!session) return;
+    const isEmpty = () => RoomBreakouts.roomIds(session).every((roomId) => getPeerCount(roomId) === 0);
+    if (!isEmpty()) return RoomBreakouts.clearTimer(session, 'idle');
+    RoomBreakouts.setTimer(session, 'idle', BREAKOUT_IDLE_MS, () => {
+        if (RoomBreakouts.get(session.mainRoom) === session && isEmpty()) {
+            closeBreakoutSession(session.mainRoom, 'idle');
+        }
+    });
 }
 
 /**
@@ -1704,20 +4019,23 @@ function isValidFileName(fileName) {
 
 /**
  * Check if valid URL
+ * Rejects non-http(s) schemes and, to prevent browser-side SSRF, any host
+ * that is localhost or a private / loopback / link-local / reserved IP.
  * @param {string} str to check
  * @returns boolean true/false
  */
-function isValidHttpURL(url) {
-    const pattern = new RegExp(
-        '^(https?:\\/\\/)?' + // protocol
-            '((([a-z\\d]([a-z\\d-]*[a-z\\d])*)\\.)+[a-z]{2,}|' + // domain name
-            '((\\d{1,3}\\.){3}\\d{1,3}))' + // OR ip (v4) address
-            '(\\:\\d+)?(\\/[-a-z\\d%_.~+]*)*' + // port and path
-            '(\\?[;&a-z\\d%_.~+=-]*)?' + // query string
-            '(\\#[-a-z\\d_]*)?$',
-        'i', // fragment locator
-    );
-    return pattern.test(url);
+function isValidHttpURL(input) {
+    try {
+        const url = new URL(input);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+        const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+        if (!host) return false;
+        if (host === 'localhost' || host.endsWith('.localhost')) return false;
+        if (Validate.isPrivateOrLoopbackHost(host)) return false;
+        return true;
+    } catch (_) {
+        return false;
+    }
 }
 
 /**
@@ -1737,6 +4055,59 @@ async function getPeerGeoLocation(ip) {
 }
 
 /**
+ * Check if a socket is a joined peer of the given room.
+ * Room broadcasts (message, caption, peerStatus, fileInfo, videoPlayer, ...)
+ * must be authorized against the server-controlled socket.id so a socket that
+ * never joined the room cannot inject events into it (cross-room injection).
+ * @param {string} room_id
+ * @param {string} socket_id server-controlled socket.id of the caller
+ * @returns {boolean}
+ */
+function isPeerInRoom(room_id, socket_id) {
+    return !!(
+        room_id &&
+        typeof room_id === 'string' &&
+        typeof socket_id === 'string' &&
+        Object.hasOwn(peers, room_id) &&
+        !roomMetaKeys.has(socket_id) &&
+        Object.hasOwn(peers[room_id], socket_id)
+    );
+}
+
+/**
+ * Check that the caller and the target peer are both joined peers of the same room.
+ * Used to authorize 1:1 relays so a socket cannot reach peers of other rooms
+ * (or peers it shares no room with) by guessing/learning their socket id.
+ * @param {object} socket caller socket
+ * @param {string} target_id client-supplied target peer id
+ * @param {string} [room_id] client-supplied room id; when omitted any room joined by the caller is considered
+ * @returns {boolean}
+ */
+function isPeerInSameRoom(socket, target_id, room_id) {
+    if (room_id) {
+        return isPeerInRoom(room_id, socket.id) && isPeerInRoom(room_id, target_id);
+    }
+    return Object.keys(socket.channels).some((ch) => isPeerInRoom(ch, socket.id) && isPeerInRoom(ch, target_id));
+}
+
+/**
+ * Omit the peer_uuid from the broadcast configuration and its nested data object if present.
+ * @param {object} config broadcast configuration object
+ * @returns {object} broadcast configuration object with peer_uuid omitted
+ */
+function omitPeerUuid(config) {
+    const broadcast = { ...config };
+    delete broadcast.peer_uuid;
+
+    if (broadcast.data && typeof broadcast.data === 'object' && !Array.isArray(broadcast.data)) {
+        broadcast.data = { ...broadcast.data };
+        delete broadcast.data.peer_uuid;
+    }
+
+    return broadcast;
+}
+
+/**
  * Check if peer is Presenter
  * @param {string} room_id
  * @param {string} peer_id
@@ -1744,27 +4115,30 @@ async function getPeerGeoLocation(ip) {
  * @param {string} peer_uuid
  * @returns boolean
  */
-async function isPeerPresenter(room_id, peer_id, peer_name, peer_uuid) {
+function isPeerPresenter(room_id, peer_id, peer_name, peer_uuid) {
     try {
-        if (!presenters[room_id] || !presenters[room_id][peer_id]) {
-            // Presenter not in the presenters config list, disconnected, or peer_id changed...
-            for (const [existingPeerID, presenter] of Object.entries(presenters[room_id] || {})) {
-                if (presenter.peer_name === peer_name) {
-                    log.debug('[' + peer_id + '] Presenter found', presenters[room_id][existingPeerID]);
-                    return true;
-                }
-            }
+        // peer_id MUST be the server-controlled socket.id of the caller.
+        // Never trust a client-supplied peer_id, peer_name, or peer_uuid for
+        // authorization decisions: look up the stored presenter entry by
+        // socket.id and require both peer_name and peer_uuid to match what
+        // was recorded at join time.
+        const roomPresentersMap = presenters[room_id];
+        const stored = roomPresentersMap && roomPresentersMap[peer_id];
+
+        if (!stored) {
+            log.debug('[' + peer_id + '] isPeerPresenter - no stored presenter entry for caller', {
+                peer_name: peer_name,
+            });
             return false;
         }
 
         const isPresenter =
-            (typeof presenters[room_id] === 'object' &&
-                Object.keys(presenters[room_id][peer_id]).length > 1 &&
-                presenters[room_id][peer_id]['peer_name'] === peer_name &&
-                presenters[room_id][peer_id]['peer_uuid'] === peer_uuid) ||
-            (roomPresenters && roomPresenters.includes(peer_name));
+            typeof stored === 'object' &&
+            stored.is_presenter === true &&
+            stored.peer_name === peer_name &&
+            stored.peer_uuid === peer_uuid;
 
-        log.debug('[' + peer_id + '] isPeerPresenter', presenters[room_id][peer_id]);
+        log.debug('[' + peer_id + '] isPeerPresenter', { stored, isPresenter });
 
         return isPresenter;
     } catch (err) {
@@ -1780,7 +4154,18 @@ async function isPeerPresenter(room_id, peer_id, peer_name, peer_uuid) {
  * @returns Boolean true/false
  */
 function isAuthPeer(username, password) {
-    return hostCfg.users && hostCfg.users.some((user) => user.username === username && user.password === password);
+    return !!getAuthPeer(username, password);
+}
+
+/**
+ * Get the HOST_USERS entry matching the credentials
+ * @param {string} username
+ * @param {string} password
+ * @returns {object|null} user { username, password, displayname, allowed_rooms } or null
+ */
+function getAuthPeer(username, password) {
+    if (!Array.isArray(hostCfg.users)) return null;
+    return hostCfg.users.find((user) => user && user.username === username && user.password === password) || null;
 }
 
 /**
@@ -1790,7 +4175,7 @@ function isAuthPeer(username, password) {
  */
 async function isValidToken(token) {
     return new Promise((resolve, reject) => {
-        jwt.verify(token, jwtCfg.JWT_KEY, (err, decoded) => {
+        jwt.verify(token, jwtKeys.sign, JWT_VERIFY_OPTIONS, (err, decoded) => {
             if (err) {
                 // Token is invalid
                 resolve(false);
@@ -1823,10 +4208,10 @@ function encodeToken(token) {
 
     // Encrypt payload using AES encryption
     const payloadString = JSON.stringify(payload);
-    const encryptedPayload = CryptoJS.AES.encrypt(payloadString, jwtCfg.JWT_KEY).toString();
+    const encryptedPayload = CryptoJS.AES.encrypt(payloadString, jwtKeys.encrypt).toString();
 
     // Constructing JWT token
-    const jwtToken = jwt.sign({ data: encryptedPayload }, jwtCfg.JWT_KEY, { expiresIn: expireValue });
+    const jwtToken = jwt.sign({ data: encryptedPayload }, jwtKeys.sign, { expiresIn: expireValue });
 
     return jwtToken;
 }
@@ -1840,13 +4225,13 @@ function decodeToken(jwtToken) {
     if (!jwtToken) return null;
 
     // Verify and decode the JWT token
-    const decodedToken = jwt.verify(jwtToken, jwtCfg.JWT_KEY);
+    const decodedToken = jwt.verify(jwtToken, jwtKeys.sign, JWT_VERIFY_OPTIONS);
     if (!decodedToken || !decodedToken.data) {
         throw new Error('Invalid token');
     }
 
     // Decrypt the payload using AES decryption
-    const decryptedPayload = CryptoJS.AES.decrypt(decodedToken.data, jwtCfg.JWT_KEY).toString(CryptoJS.enc.Utf8);
+    const decryptedPayload = CryptoJS.AES.decrypt(decodedToken.data, jwtKeys.encrypt).toString(CryptoJS.enc.Utf8);
 
     // Parse the decrypted payload as JSON
     const payload = JSON.parse(decryptedPayload);
@@ -1864,7 +4249,7 @@ function getActiveRooms() {
     for (const roomId in peers) {
         if (peers.hasOwnProperty(roomId)) {
             // Get the count of peers in the current room
-            const peersCount = Object.keys(peers[roomId]).length;
+            const peersCount = getPeerCount(roomId);
             roomPeersArray.push({
                 roomId: roomId,
                 peersCount: peersCount,
@@ -1875,25 +4260,77 @@ function getActiveRooms() {
 }
 
 /**
+ * Check if Allowed Room Access
+ * @param {string} logMessage
+ * @param {object} req
+ * @param {object} hostCfg
+ * @param {object} peers
+ * @param {string} roomId
+ * @returns boolean true/false
+ */
+function isAllowedRoomAccess(logMessage, req, hostCfg, peers, roomId) {
+    const OIDCUserAuthenticated = OIDC.enabled && req.oidc.isAuthenticated();
+    const OIDCAllowRoomCreationForAuthUsers = OIDC.allowRoomCreationForAuthUsers;
+    const hostUserAuthenticated = hostCfg.protected && hostCfg.authenticated;
+    const roomExist = roomId in peers;
+    const roomCount = Object.keys(peers).length;
+
+    const allowRoomAccess =
+        (!hostCfg.protected && !OIDC.enabled) || // No host protection and OIDC mode enabled (default)
+        (OIDCUserAuthenticated && roomExist) || // User authenticated via OIDC and room Exist
+        (hostUserAuthenticated && roomExist) || // User authenticated via Login and room Exist
+        ((OIDCUserAuthenticated || hostUserAuthenticated) && roomCount === 0) || // User authenticated joins the first room
+        (OIDCUserAuthenticated && OIDCAllowRoomCreationForAuthUsers) || // Allow room creation if authenticated via OIDC
+        RoomBreakouts.isSessionRoom(roomId) || // Main or breakout room of an open session (join checks the ticket)
+        roomExist; // User Or Guest join an existing Room
+
+    log.debug(logMessage, {
+        OIDCUserAuthenticated: OIDCUserAuthenticated,
+        hostUserAuthenticated: hostUserAuthenticated,
+        roomExist: roomExist,
+        roomCount: roomCount,
+        extraInfo: {
+            roomId: roomId,
+            OIDCUserEnabled: OIDC.enabled,
+            hostProtected: hostCfg.protected,
+            hostAuthenticated: hostCfg.authenticated,
+            OIDCAllowRoomCreationForAuthUsers,
+        },
+        allowRoomAccess: allowRoomAccess,
+    });
+
+    return allowRoomAccess;
+}
+
+/**
  * Get ip
+ * Honours the X-Forwarded-For header only when Express has been configured
+ * with a `trust proxy` setting that matches the deployment topology. Reading
+ * the header directly from req.headers would let any client spoof its source
+ * address and bypass security controls such as the IP allow-list.
  * @param {object} req
  * @returns string ip
  */
 function getIP(req) {
-    return req.headers['x-forwarded-for'] || req.headers['X-Forwarded-For'] || req.socket.remoteAddress || req.ip;
+    return req.ip || req.socket?.remoteAddress;
 }
 
 /**
  * Get IP from socket
+ * Same rationale as getIP(): rely on the address that the underlying
+ * transport observed and only trust X-Forwarded-For when explicitly enabled
+ * via the trust proxy configuration.
  * @param {object} socket
  * @returns string
  */
 function getSocketIP(socket) {
-    return (
-        socket.handshake.headers['x-forwarded-for'] ||
-        socket.handshake.headers['X-Forwarded-For'] ||
-        socket.handshake.address
-    );
+    if (trustProxy) {
+        const forwarded = socket.handshake.headers['x-forwarded-for'] || socket.handshake.headers['X-Forwarded-For'];
+        if (forwarded) {
+            return forwarded.split(',')[0].trim();
+        }
+    }
+    return socket.handshake.address;
 }
 
 /**
@@ -1926,3 +4363,59 @@ function removeIP(socket) {
         }
     }
 }
+
+/**
+ * Graceful shutdown: notify clients the server is restarting so they auto-reconnect and rejoin
+ */
+let isShuttingDown = false;
+let shutdownStartedAt = 0;
+const SHUTDOWN_NOTIFY_DELAY_MS = 1000;
+const SHUTDOWN_FORCE_EXIT_MS = 10000;
+// `npm start` + Ctrl+C delivers SIGINT twice (from the terminal and forwarded by npm) within a few ms
+const SHUTDOWN_DUPLICATE_SIGNAL_WINDOW_MS = 2000;
+
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) {
+        if (Date.now() - shutdownStartedAt < SHUTDOWN_DUPLICATE_SIGNAL_WINDOW_MS) {
+            log.debug(`${signal} received again during shutdown, ignoring duplicate signal`);
+            return;
+        }
+        log.warn(`${signal} received again, forcing exit...`);
+        process.exit(1);
+    }
+
+    isShuttingDown = true;
+    shutdownStartedAt = Date.now();
+    log.info(`${signal} received, starting graceful shutdown...`);
+
+    setTimeout(() => {
+        log.warn('Graceful shutdown timed out, forcing exit...');
+        process.exit(1);
+    }, SHUTDOWN_FORCE_EXIT_MS).unref();
+
+    try {
+        // 1. Notify all connected clients the server is restarting,
+        // then give the message time to flush before tearing anything down
+        log.debug('Notifying clients about server shutdown...');
+        io.emit('serverShutdown', { message: 'Server is restarting' });
+        await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_NOTIFY_DELAY_MS));
+
+        // 2. Cleanup HTML injector
+        htmlInjector.cleanup();
+
+        // 3. Close Socket.IO server (and the underlying HTTP server). Do NOT use socket.disconnect(true):
+        // it sends an "io server disconnect" packet, which stops clients from auto-reconnecting.
+        // io.close() only drops the transports, so clients reconnect and rejoin once the server is back.
+        log.debug('Closing Socket.IO and HTTP server...');
+        await io.close();
+
+        log.info('Graceful shutdown completed');
+        process.exit(0);
+    } catch (err) {
+        log.error('Error during graceful shutdown', err.message);
+        process.exit(1);
+    }
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
